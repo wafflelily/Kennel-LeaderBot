@@ -6,12 +6,10 @@ Description:
 Version: 6.5.0
 """
 
-import json
 import logging
 import os
 import platform
 import random
-import sys
 
 import aiosqlite
 import discord
@@ -57,6 +55,12 @@ intents.presences = True
 """
 
 intents = discord.Intents.default()
+
+# Required so the bot can read message text when scanning channel history
+# (e.g. the /foodguessr leaderboard command). This is a privileged intent and
+# must also be enabled in the Discord developer portal under Bot > Privileged
+# Gateway Intents.
+intents.message_content = True
 
 """
 Uncomment this if you want to use prefix (normal) commands.
@@ -170,7 +174,7 @@ class DiscordBot(commands.Bot):
         """
         Setup the game status task of the bot.
         """
-        statuses = ["with you!", "with Krypton!", "with humans!"]
+        statuses = ["Battery is so cool", "mmm, food", "le catfishing"]
         await self.change_presence(activity=discord.Game(random.choice(statuses)))
 
     @status_task.before_loop
