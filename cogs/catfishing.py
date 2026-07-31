@@ -29,10 +29,12 @@ is one the player marked as "close enough". A score is one point per cat plus
 half a point per egg, out of 10 questions (two rows of five).
 """
 
+import asyncio
 import re
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
+import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -49,6 +51,12 @@ QUESTIONS = 10
 # Matches the puzzle/score line, e.g. "#725 - 4/10" or "694 - 3.5/10".
 # Group 1 is the puzzle number, group 2 is the stated score.
 SCORE_RE = re.compile(r"#?(\d+)\s*-\s*(\d+(?:\.\d+)?)\s*/\s*10\b")
+
+# Per-puzzle stats endpoint. The `day` query param is the puzzle number shown
+# in the shared result (e.g. "#714" -> day=714).
+API_URL = "https://catfishing.net/api/game?day={day}"
+# How many of the hardest answers to show.
+HARDEST_COUNT = 5
 
 # Month names accepted in the `month` argument, mapped to their number.
 MONTHS = {
@@ -75,6 +83,39 @@ def _fmt(score: float) -> str:
 class Catfishing(commands.Cog, name="catfishing"):
     def __init__(self, bot) -> None:
         self.bot = bot
+        # Cache of puzzle stats keyed by puzzle number: {day: (titles, rates)}.
+        # Historical puzzle stats don't change, so caching across invocations
+        # is safe and avoids re-fetching.
+        self._puzzle_cache: dict[int, tuple] = {}
+
+    async def _fetch_puzzle(self, session: aiohttp.ClientSession, day: int):
+        """
+        Fetch a puzzle's stats from catfishing.net.
+
+        Returns ``(titles, rates)`` — parallel lists where ``titles[i]`` is the
+        answer for question ``i`` and ``rates[i]`` is the global percentage of
+        players who got it right (lower = harder). Returns None on any failure.
+        """
+        if day in self._puzzle_cache:
+            return self._puzzle_cache[day]
+        try:
+            async with session.get(
+                API_URL.format(day=day),
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+            return None
+
+        articles = data.get("articles") or []
+        stats_articles = (data.get("stats") or {}).get("articles") or []
+        titles = [a.get("title") for a in articles]
+        rates = [sa.get("correctRate") for sa in stats_articles]
+        result = (titles, rates)
+        self._puzzle_cache[day] = result
+        return result
 
     @staticmethod
     def _score_grid(grid, cat, egg):
@@ -170,7 +211,6 @@ class Catfishing(commands.Cog, name="catfishing"):
         # Accept "June", "Jun", "June 2026", "2026-06", "6".
         text = month.strip().lower()
         year = now.year
-        month_num = None
 
         iso = re.fullmatch(r"(\d{4})[-/](\d{1,2})", text)
         if iso:
@@ -231,30 +271,49 @@ class Catfishing(commands.Cog, name="catfishing"):
         # group_correct[puzzle] = set of question indexes the group got (cat/egg)
         group_correct: dict[int, set] = defaultdict(set)
         # puzzle_date[puzzle] = the (earliest) date that puzzle was posted
-        puzzle_date: dict[int, "datetime.date"] = {}
+        puzzle_date: dict[int, date] = {}
+        # solvers[puzzle][question_index] = set of names who got that question
+        solvers: dict[int, dict[int, set]] = defaultdict(lambda: defaultdict(set))
 
-        async for message in context.channel.history(limit=None, after=after):
-            if not message.content:
-                continue
-            result = self._parse_message(message.content, message.created_at.date())
-            if result is None:
-                continue
-            puzzle, played_on, score, correct = result
+        try:
+            async for message in context.channel.history(limit=None, after=after):
+                if not message.content:
+                    continue
+                result = self._parse_message(message.content, message.created_at.date())
+                if result is None:
+                    continue
+                puzzle, played_on, score, correct = result
 
-            if (played_on.year, played_on.month) != month_filter:
-                continue
+                if (played_on.year, played_on.month) != month_filter:
+                    continue
 
-            entry = players[message.author.id]
-            entry["name"] = message.author.display_name
-            # Keep the best score if someone posts the same puzzle twice.
-            existing = entry["scores"].get(puzzle)
-            if existing is None or score > existing:
-                entry["scores"][puzzle] = score
-            # The group "gets" a question if anyone got it right.
-            group_correct[puzzle] |= correct
-            existing_date = puzzle_date.get(puzzle)
-            if existing_date is None or played_on < existing_date:
-                puzzle_date[puzzle] = played_on
+                entry = players[message.author.id]
+                entry["name"] = message.author.display_name
+                # Keep the best score if someone posts the same puzzle twice.
+                existing = entry["scores"].get(puzzle)
+                if existing is None or score > existing:
+                    entry["scores"][puzzle] = score
+                # The group "gets" a question if anyone got it right.
+                group_correct[puzzle] |= correct
+                for position in correct:
+                    solvers[puzzle][position].add(message.author.display_name)
+                existing_date = puzzle_date.get(puzzle)
+                if existing_date is None or played_on < existing_date:
+                    puzzle_date[puzzle] = played_on
+        except discord.Forbidden:
+            await context.send(
+                embed=discord.Embed(
+                    title="Error!",
+                    description=(
+                        "I don't have permission to read the history in this channel.\n\n"
+                        "Please give me the **View Channel** and **Read Message History** "
+                        "permissions here (check the channel-specific permission overrides), "
+                        "then try again."
+                    ),
+                    color=0xE02B2B,
+                )
+            )
+            return
 
         if not players:
             await context.send(
@@ -320,6 +379,41 @@ class Catfishing(commands.Cog, name="catfishing"):
                 f"Best group score was **{best_aggregate}/{QUESTIONS}**, reached {reached}."
             )
         embed.add_field(name="🤝 Group best", value=group_text, inline=False)
+
+        # Hardest answers anyone in the channel got. Pull each puzzle's global
+        # stats from catfishing.net and rank the solved questions by how few
+        # players worldwide got them right.
+        async with aiohttp.ClientSession() as session:
+            fetched = await asyncio.gather(
+                *(self._fetch_puzzle(session, day) for day in solvers)
+            )
+        puzzle_stats = dict(zip(solvers, fetched))
+
+        answers = []  # (rate, title, puzzle, names)
+        for puzzle, positions in solvers.items():
+            stats = puzzle_stats.get(puzzle)
+            if stats is None:
+                continue
+            titles, rates = stats
+            for position, names in positions.items():
+                if position >= len(rates) or rates[position] is None:
+                    continue
+                title = titles[position] if position < len(titles) else "?"
+                answers.append((rates[position], title, puzzle, names))
+
+        answers.sort(key=lambda a: a[0])
+        if answers:
+            hardest_lines = []
+            for i, (rate, title, puzzle, names) in enumerate(answers[:HARDEST_COUNT], 1):
+                who = ", ".join(sorted(names))
+                hardest_lines.append(
+                    f"{i}. **{title}** — only {rate:.1f}% got it (#{puzzle}) — {who}"
+                )
+            embed.add_field(
+                name="🧠 Hardest answers",
+                value="\n".join(hardest_lines),
+                inline=False,
+            )
 
         embed.set_footer(
             text=f"Period: {label} • {len(ranking)} players • {len(aggregates)} days played"

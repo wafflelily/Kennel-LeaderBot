@@ -156,7 +156,6 @@ class FoodGuessr(commands.Cog, name="foodguessr"):
         # Accept "June", "Jun", "June 2026", "2026-06", "6".
         text = month.strip().lower()
         year = now.year
-        month_num = None
 
         iso = re.fullmatch(r"(\d{4})[-/](\d{1,2})", text)
         if iso:
@@ -216,32 +215,47 @@ class FoodGuessr(commands.Cog, name="foodguessr"):
         )
         parsed_messages = 0
 
-        async for message in context.channel.history(limit=None, after=after):
-            if not message.content:
-                continue
-            result = self._parse_message(
-                message.content, message.created_at.date()
+        try:
+            async for message in context.channel.history(limit=None, after=after):
+                if not message.content:
+                    continue
+                result = self._parse_message(
+                    message.content, message.created_at.date()
+                )
+                if result is None:
+                    continue
+                played_on, score = result
+
+                if month_filter is not None and (
+                    played_on.year,
+                    played_on.month,
+                ) != month_filter:
+                    continue
+
+                entry = totals[message.author.id]
+                entry["name"] = message.author.display_name
+                # Keep the best score if someone posts the same day more than once.
+                existing = entry["days"].get(played_on)
+                if existing is None or score > existing:
+                    if existing is not None:
+                        entry["total"] -= existing
+                    entry["days"][played_on] = score
+                    entry["total"] += score
+                    parsed_messages += 1
+        except discord.Forbidden:
+            await context.send(
+                embed=discord.Embed(
+                    title="Error!",
+                    description=(
+                        "I don't have permission to read the history in this channel.\n\n"
+                        "Please give me the **View Channel** and **Read Message History** "
+                        "permissions here (check the channel-specific permission overrides), "
+                        "then try again."
+                    ),
+                    color=0xE02B2B,
+                )
             )
-            if result is None:
-                continue
-            played_on, score = result
-
-            if month_filter is not None and (
-                played_on.year,
-                played_on.month,
-            ) != month_filter:
-                continue
-
-            entry = totals[message.author.id]
-            entry["name"] = message.author.display_name
-            # Keep the best score if someone posts the same day more than once.
-            existing = entry["days"].get(played_on)
-            if existing is None or score > existing:
-                if existing is not None:
-                    entry["total"] -= existing
-                entry["days"][played_on] = score
-                entry["total"] += score
-                parsed_messages += 1
+            return
 
         if not totals:
             await context.send(
