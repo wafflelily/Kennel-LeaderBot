@@ -62,6 +62,13 @@ intents = discord.Intents.default()
 # Gateway Intents.
 intents.message_content = True
 
+# Populates and keeps the guild member cache current, so the leaderboard cogs
+# can resolve each player's up-to-date server nickname from their stored id
+# without hitting the API on every command (see leaderboard.base._resolve_names).
+# This is also a privileged intent and must be enabled in the Discord developer
+# portal under Bot > Privileged Gateway Intents ("Server Members Intent").
+intents.members = True
+
 """
 Uncomment this if you want to use prefix (normal) commands.
 It is recommended to use slash commands and therefore not use prefix commands.

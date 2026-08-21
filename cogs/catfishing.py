@@ -1,10 +1,9 @@
 """
 Catfishing leaderboard cog for Kennel-LeaderBot.
 
-Scans the channel/thread the command is invoked in for shared Catfishing
-results, tallies each person's monthly scores, and posts a leaderboard with
-totals, averages and personal bests. It also reports on how many days the
-group collectively got every question right.
+Tallies shared Catfishing results in the channel/thread the command is invoked
+in — each person's monthly scores with totals, averages and personal bests —
+and reports how many days the group collectively got every question right.
 
 Expected message format (as copy-pasted from catfishing.net):
 
@@ -27,18 +26,24 @@ The grid may also be given as text, with C=cat, F=fish, E=egg::
 A 🐈 (cat) is a correct answer, a 🐟 (fish) is a wrong answer, and a 🥚 (egg)
 is one the player marked as "close enough". A score is one point per cat plus
 half a point per egg, out of 10 questions (two rows of five).
+
+Parsed results are cached in the database (see ``leaderboard.base``); the
+command does an incremental catch-up scan and reads its aggregates from there
+rather than re-scanning the whole channel each time.
 """
 
 import asyncio
 import re
-from collections import defaultdict
-from datetime import date, datetime, timedelta, timezone
+from collections import Counter, defaultdict
+from datetime import date
 
 import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
 from discord.ext.commands import Context
+
+from leaderboard.base import LeaderboardCog
 
 # The three result symbols. Cats are correct, eggs are "close enough", fish are
 # wrong. Cats and eggs both count as the group getting that question.
@@ -58,31 +63,17 @@ API_URL = "https://catfishing.net/api/game?day={day}"
 # How many of the hardest answers to show.
 HARDEST_COUNT = 5
 
-# Month names accepted in the `month` argument, mapped to their number.
-MONTHS = {
-    "jan": 1, "january": 1,
-    "feb": 2, "february": 2,
-    "mar": 3, "march": 3,
-    "apr": 4, "april": 4,
-    "may": 5,
-    "jun": 6, "june": 6,
-    "jul": 7, "july": 7,
-    "aug": 8, "august": 8,
-    "sep": 9, "sept": 9, "september": 9,
-    "oct": 10, "october": 10,
-    "nov": 11, "november": 11,
-    "dec": 12, "december": 12,
-}
-
 
 def _fmt(score: float) -> str:
     """Format a score without a trailing ``.0`` (e.g. 4, 3.5)."""
     return f"{score:g}"
 
 
-class Catfishing(commands.Cog, name="catfishing"):
+class Catfishing(LeaderboardCog, name="catfishing"):
+    GAME = "catfishing"
+
     def __init__(self, bot) -> None:
-        self.bot = bot
+        super().__init__(bot)
         # Cache of puzzle stats keyed by puzzle number: {day: (titles, rates)}.
         # Historical puzzle stats don't change, so caching across invocations
         # is safe and avoids re-fetching.
@@ -123,11 +114,11 @@ class Catfishing(commands.Cog, name="catfishing"):
         Score a sequence of result markers.
 
         Returns ``(score, correct_positions)`` where ``score`` is one point per
-        cat plus half a point per egg, and ``correct_positions`` is the set of
+        cat plus half a point per egg, and ``correct_positions`` is the list of
         indexes that were a cat or egg.
         """
         score = sum(1 for s in grid if s == cat) + 0.5 * sum(1 for s in grid if s == egg)
-        correct = {i for i, s in enumerate(grid) if s in (cat, egg)}
+        correct = [i for i, s in enumerate(grid) if s in (cat, egg)]
         return score, correct
 
     @classmethod
@@ -161,86 +152,68 @@ class Catfishing(commands.Cog, name="catfishing"):
 
         return None
 
-    @classmethod
-    def _parse_message(cls, content: str, posted_on):
+    def parse(self, content: str, posted_on: date):
         """
-        Extract a Catfishing result from a message.
+        Parse a Catfishing result into ``(played_on, payload)`` for the cache.
 
-        Returns ``(puzzle, posted_on, score, correct_positions)`` where
-        ``puzzle`` is the puzzle number, ``score`` is cats + half-eggs, and
-        ``correct_positions`` is the set of question indexes (0-9) the player
-        got right (cat or egg). Returns None if the message isn't a result.
+        ``payload`` holds the ``puzzle`` number, the ``score`` (cats + half-eggs)
+        and the ``correct`` question indexes (0-9, cat or egg). ``played_on`` is
+        the post date. Returns None if the message isn't a result.
         """
         match = SCORE_RE.search(content)
         if match is None:
             return None
 
-        grid = cls._extract_grid(content)
+        grid = self._extract_grid(content)
         if grid is None:
             return None
 
         puzzle = int(match.group(1))
         score, correct = grid
-        return puzzle, posted_on, score, correct
+        return posted_on, {"puzzle": puzzle, "score": score, "correct": correct}
 
     @staticmethod
-    def _resolve_window(month: str | None):
+    def _date_anchor(rows) -> int | None:
         """
-        Work out the (after, label, month_filter) for the scan.
+        Work out the offset that maps a puzzle number to its real date.
 
-        - `after` is the UTC datetime to start fetching history from.
-        - `label` describes the period for the embed title.
-        - `month_filter` is a (year, month) tuple to keep only matching days.
+        Catfishing results carry only a puzzle number, not a date, so the post
+        date is an unreliable guide near month boundaries (a puzzle can be posted
+        just after midnight, or a day or two late). But the puzzles are a daily
+        sequence, so ``real_date = puzzle_number + anchor`` for a fixed anchor.
+
+        We recover that anchor from the data: for a same-day post,
+        ``post_ordinal - puzzle_number`` equals the anchor, so the most common
+        value of that difference across all cached results is the anchor. Late
+        or catch-up posts are outvoted. Returns None if there's nothing to go on.
         """
-        now = datetime.now(timezone.utc)
-        if month is None:
-            # Default: the previous calendar month, unless today is the final
-            # day of the current month (in which case use the current month).
-            is_last_day_of_month = (now + timedelta(days=1)).month != now.month
-            if is_last_day_of_month:
-                year, month_num = now.year, now.month
-            elif now.month == 1:
-                year, month_num = now.year - 1, 12
-            else:
-                year, month_num = now.year, now.month - 1
+        offsets = Counter(
+            row["played_on"].toordinal() - row["payload"]["puzzle"] for row in rows
+        )
+        if not offsets:
+            return None
+        return offsets.most_common(1)[0][0]
 
-            after = datetime(year, month_num, 1, tzinfo=timezone.utc)
-            label = f"{datetime(year, month_num, 1):%B %Y}"
-            return after, label, (year, month_num)
-
-        # Accept "June", "Jun", "June 2026", "2026-06", "6".
-        text = month.strip().lower()
-        year = now.year
-
-        iso = re.fullmatch(r"(\d{4})[-/](\d{1,2})", text)
-        if iso:
-            year, month_num = int(iso.group(1)), int(iso.group(2))
-        else:
-            parts = text.split()
-            name = parts[0]
-            month_num = MONTHS.get(name)
-            if month_num is None and name.isdigit():
-                month_num = int(name)
-            if len(parts) > 1 and parts[1].isdigit():
-                year = int(parts[1])
-
-        if month_num is None or not 1 <= month_num <= 12:
-            return None  # signals "could not parse"
-
-        after = datetime(year, month_num, 1, tzinfo=timezone.utc)
-        label = f"{datetime(year, month_num, 1):%B %Y}"
-        return after, label, (year, month_num)
+    @classmethod
+    def _puzzle_date(cls, puzzle: int, anchor: int | None, fallback: date) -> date:
+        """Map a puzzle number to its real date, falling back to the post date."""
+        if anchor is None:
+            return fallback
+        try:
+            return date.fromordinal(puzzle + anchor)
+        except (ValueError, OverflowError):
+            return fallback
 
     @commands.hybrid_command(
         name="catfishing",
         description="Tally Catfishing scores in this channel and show a leaderboard.",
     )
     @app_commands.describe(
-        month="Month to tally, e.g. 'June', 'Jun 2026' or '2026-06'. Defaults to last full month.",
+        month="Month to tally, e.g. 'June', 'Jun 2026' or '2026-06'. Defaults to the previous full month.",
     )
     async def catfishing(self, context: Context, *, month: str = None) -> None:
         """
-        Scan the current channel/thread for Catfishing results and post a leaderboard.
+        Tally the current channel/thread's Catfishing results and post a leaderboard.
 
         :param context: The hybrid command context.
         :param month: Optional month to tally; defaults to the previous full month.
@@ -261,45 +234,14 @@ class Catfishing(commands.Cog, name="catfishing"):
 
         after, label, month_filter = window
 
-        # Scanning history can take a while, so let Discord know we're working.
+        # Bringing the cache up to date can take a while on the first scan.
         await context.defer()
 
-        # players[author_id] = {"name": str, "scores": {puzzle: score}}
-        players: dict[int, dict] = defaultdict(
-            lambda: {"name": "", "scores": {}}
-        )
-        # group_correct[puzzle] = set of question indexes the group got (cat/egg)
-        group_correct: dict[int, set] = defaultdict(set)
-        # puzzle_date[puzzle] = the (earliest) date that puzzle was posted
-        puzzle_date: dict[int, date] = {}
-        # solvers[puzzle][question_index] = set of names who got that question
-        solvers: dict[int, dict[int, set]] = defaultdict(lambda: defaultdict(set))
-
         try:
-            async for message in context.channel.history(limit=None, after=after):
-                if not message.content:
-                    continue
-                result = self._parse_message(message.content, message.created_at.date())
-                if result is None:
-                    continue
-                puzzle, played_on, score, correct = result
-
-                if (played_on.year, played_on.month) != month_filter:
-                    continue
-
-                entry = players[message.author.id]
-                entry["name"] = message.author.display_name
-                # Keep the best score if someone posts the same puzzle twice.
-                existing = entry["scores"].get(puzzle)
-                if existing is None or score > existing:
-                    entry["scores"][puzzle] = score
-                # The group "gets" a question if anyone got it right.
-                group_correct[puzzle] |= correct
-                for position in correct:
-                    solvers[puzzle][position].add(message.author.display_name)
-                existing_date = puzzle_date.get(puzzle)
-                if existing_date is None or played_on < existing_date:
-                    puzzle_date[puzzle] = played_on
+            # Scan a little before the month starts so a puzzle posted just
+            # before the boundary is still cached. Which month a result *counts*
+            # toward is decided below by the puzzle number, not the post date.
+            await self._sync_channel(context.channel, after - self.SCAN_BUFFER)
         except discord.Forbidden:
             await context.send(
                 embed=discord.Embed(
@@ -314,6 +256,59 @@ class Catfishing(commands.Cog, name="catfishing"):
                 )
             )
             return
+
+        # Load every cached result and attribute each to a month by its puzzle
+        # number's real date, rather than the post date. This keeps boundary and
+        # catch-up posts in the month they were actually played, and stops a
+        # puzzle from a neighbouring month being counted here by accident.
+        all_rows = await self._load_all(context.channel.id)
+        anchor = self._date_anchor(all_rows)
+        rows = []
+        for row in all_rows:
+            played_on = self._puzzle_date(
+                row["payload"]["puzzle"], anchor, row["played_on"]
+            )
+            if (played_on.year, played_on.month) == month_filter:
+                # Carry the derived date forward as the result's played-on date.
+                rows.append({**row, "played_on": played_on})
+
+        # Resolve each player's current server nickname from their stored id, so
+        # names stay right even after someone renames (stored name is fallback).
+        names = await self._resolve_names(
+            context.guild,
+            [row["author_id"] for row in rows],
+            {row["author_id"]: row["author_name"] for row in rows},
+        )
+
+        # players[author_id] = {"name": str, "scores": {puzzle: score}}
+        players: dict[int, dict] = defaultdict(lambda: {"name": "", "scores": {}})
+        # group_correct[puzzle] = set of question indexes the group got (cat/egg)
+        group_correct: dict[int, set] = defaultdict(set)
+        # puzzle_date[puzzle] = the (earliest) date that puzzle was posted
+        puzzle_date: dict[int, date] = {}
+        # solvers[puzzle][question_index] = set of names who got that question
+        solvers: dict[int, dict[int, set]] = defaultdict(lambda: defaultdict(set))
+
+        for row in rows:
+            played_on = row["played_on"]
+            puzzle = row["payload"]["puzzle"]
+            score = row["payload"]["score"]
+            correct = set(row["payload"]["correct"])
+            display = names[row["author_id"]]
+
+            entry = players[row["author_id"]]
+            entry["name"] = display
+            # Keep the best score if someone posts the same puzzle twice.
+            existing = entry["scores"].get(puzzle)
+            if existing is None or score > existing:
+                entry["scores"][puzzle] = score
+            # The group "gets" a question if anyone got it right.
+            group_correct[puzzle] |= correct
+            for position in correct:
+                solvers[puzzle][position].add(display)
+            existing_date = puzzle_date.get(puzzle)
+            if existing_date is None or played_on < existing_date:
+                puzzle_date[puzzle] = played_on
 
         if not players:
             await context.send(

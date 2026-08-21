@@ -11,6 +11,8 @@ from discord import app_commands
 from discord.ext import commands
 from discord.ext.commands import Context
 
+from leaderboard.base import LeaderboardCog
+
 
 class Owner(commands.Cog, name="owner"):
     def __init__(self, bot) -> None:
@@ -168,6 +170,74 @@ class Owner(commands.Cog, name="owner"):
             description=f"Successfully reloaded the `{cog}` cog.", color=0xBEBEFE
         )
         await context.send(embed=embed)
+
+    @commands.hybrid_command(
+        name="rebuild",
+        description="Clear cached leaderboard data so it's re-scanned and re-parsed on next use.",
+    )
+    @app_commands.describe(
+        game="Which leaderboard to reset, e.g. `gauntle`. Omit to reset all of them.",
+    )
+    @commands.is_owner()
+    async def rebuild(self, context: Context, game: str = None) -> None:
+        """
+        Invalidate the leaderboard cache after the parsing logic changes.
+
+        Deletes the cached results and scan state so the next time each
+        leaderboard command runs in a channel it re-scans that channel's history
+        and re-parses every result under the current rules.
+
+        :param context: The hybrid command context.
+        :param game: Optional game to reset; if omitted, every leaderboard is reset.
+        """
+        # Discover the loaded leaderboard cogs rather than hardcoding names.
+        games = {
+            cog.GAME: cog
+            for cog in self.bot.cogs.values()
+            if isinstance(cog, LeaderboardCog)
+        }
+        if not games:
+            await context.send(
+                embed=discord.Embed(
+                    description="No leaderboard cogs are loaded.", color=0xE02B2B
+                )
+            )
+            return
+
+        if game is not None:
+            game = game.strip().lower()
+            if game not in games:
+                valid = ", ".join(f"`{g}`" for g in sorted(games))
+                await context.send(
+                    embed=discord.Embed(
+                        title="Error!",
+                        description=f"Unknown leaderboard `{game}`.\nValid options: {valid}.",
+                        color=0xE02B2B,
+                    )
+                )
+                return
+            targets = [game]
+        else:
+            targets = sorted(games)
+
+        removed = 0
+        for name in targets:
+            removed += await self.bot.database.clear_leaderboard_game(name)
+
+        names = ", ".join(f"`{name}`" for name in targets)
+        await context.send(
+            embed=discord.Embed(
+                title="🔄 Leaderboard cache cleared",
+                description=(
+                    f"Cleared cached data for {names} ({removed} result"
+                    f"{'s' if removed != 1 else ''} removed).\n\n"
+                    "The next time each command runs in a channel it will re-scan "
+                    "that channel's history and re-parse everything under the "
+                    "current rules."
+                ),
+                color=0xBEBEFE,
+            )
+        )
 
     @commands.hybrid_command(
         name="shutdown",

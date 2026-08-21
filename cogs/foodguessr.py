@@ -1,9 +1,8 @@
 """
 FoodGuessr leaderboard cog for Kennel-LeaderBot.
 
-Scans the channel/thread the command is invoked in for shared FoodGuessr
-results, tallies each person's daily total scores over a period, and posts
-a leaderboard.
+Tallies shared FoodGuessr results in the channel/thread the command is invoked
+in — each person's best daily score over a period — and posts a leaderboard.
 
 Expected message format (as copy-pasted from FoodGuessr):
 
@@ -13,18 +12,23 @@ Expected message format (as copy-pasted from FoodGuessr):
     🌕🌕🌕🌑 3,500 ⋅ Round 3
     Total score: 11,500/15,000
     (+1,735 above today's average!) 🎉
+
+Parsed results are cached in the database (see ``leaderboard.base``); the
+command does an incremental catch-up scan and reads its aggregates from there
+rather than re-scanning the whole channel each time.
 """
 
 import re
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import date
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 from discord.ext.commands import Context
 
-# Matches the header line, capturing month abbreviation, day and year.
+from leaderboard.base import MONTHS, LeaderboardCog
+
 # Matches a date with an optional leading weekday, capturing month abbreviation,
 # day and year. Works both inside the header line ("FoodGuessr - Thursday,
 # Jun 18, 2026 UTC") and as a standalone line ("Tuesday, Jun 16, 2026").
@@ -37,26 +41,9 @@ GOT_RE = re.compile(r"I got\s*([\d,]+)\s*on the FoodGuessr", re.IGNORECASE)
 # A perfect game is 5,000 in all three rounds.
 PERFECT_SCORE = 15000
 
-# Month names accepted in the `month` argument, mapped to their number.
-MONTHS = {
-    "jan": 1, "january": 1,
-    "feb": 2, "february": 2,
-    "mar": 3, "march": 3,
-    "apr": 4, "april": 4,
-    "may": 5,
-    "jun": 6, "june": 6,
-    "jul": 7, "july": 7,
-    "aug": 8, "august": 8,
-    "sep": 9, "sept": 9, "september": 9,
-    "oct": 10, "october": 10,
-    "nov": 11, "november": 11,
-    "dec": 12, "december": 12,
-}
 
-
-class FoodGuessr(commands.Cog, name="foodguessr"):
-    def __init__(self, bot) -> None:
-        self.bot = bot
+class FoodGuessr(LeaderboardCog, name="foodguessr"):
+    GAME = "foodguessr"
 
     @staticmethod
     def _parse_date(content: str):
@@ -69,7 +56,7 @@ class FoodGuessr(commands.Cog, name="foodguessr"):
         if month is None:
             return None
         try:
-            return datetime(int(year), month, int(day)).date()
+            return date(int(year), month, int(day))
         except ValueError:
             return None
 
@@ -103,92 +90,40 @@ class FoodGuessr(commands.Cog, name="foodguessr"):
             return None
         return total
 
-    @classmethod
-    def _parse_message(cls, content: str, posted_on):
+    def parse(self, content: str, posted_on: date):
         """
-        Extract (date, score) from a FoodGuessr result message.
+        Parse a FoodGuessr result into ``(played_on, payload)`` for the cache.
 
         Supports the "Total score: X/Y" format, the "I got X on the FoodGuessr
         Daily!" format, and the bare four-line numbers format. When the message
-        has no in-text date, `posted_on` (the message's post date) is used.
-
-        Returns a tuple of (datetime.date, int) or None if the message is not a
-        recognised FoodGuessr result.
+        has no in-text date, the post date is used. ``payload`` holds the day's
+        ``score``. Returns None if the message isn't a recognised result.
         """
         total = TOTAL_RE.search(content) or GOT_RE.search(content)
         if total is not None:
-            played_on = cls._parse_date(content) or posted_on
+            played_on = self._parse_date(content) or posted_on
             score = int(total.group(1).replace(",", ""))
-            return played_on, score
+            return played_on, {"score": score}
 
         # Bare numbers-only format: no date available, so use the post date.
-        score = cls._parse_numbers_only(content)
+        score = self._parse_numbers_only(content)
         if score is not None:
-            return posted_on, score
+            return posted_on, {"score": score}
         return None
-
-    @staticmethod
-    def _resolve_window(month: str | None):
-        """
-        Work out the (after, label, month_filter) for the scan.
-
-        - `after` is the UTC datetime to start fetching history from.
-        - `label` describes the period for the embed title.
-        - `month_filter` is a (year, month) tuple to keep only matching days, or
-          None to keep everything in the window.
-        """
-        now = datetime.now(timezone.utc)
-        if month is None:
-            # Default: the previous calendar month, unless today is the final
-            # day of the current month (in which case use the current month).
-            is_last_day_of_month = (now + timedelta(days=1)).month != now.month
-            if is_last_day_of_month:
-                year, month_num = now.year, now.month
-            elif now.month == 1:
-                year, month_num = now.year - 1, 12
-            else:
-                year, month_num = now.year, now.month - 1
-
-            after = datetime(year, month_num, 1, tzinfo=timezone.utc)
-            label = f"{datetime(year, month_num, 1):%B %Y}"
-            return after, label, (year, month_num)
-
-        # Accept "June", "Jun", "June 2026", "2026-06", "6".
-        text = month.strip().lower()
-        year = now.year
-
-        iso = re.fullmatch(r"(\d{4})[-/](\d{1,2})", text)
-        if iso:
-            year, month_num = int(iso.group(1)), int(iso.group(2))
-        else:
-            parts = text.split()
-            name = parts[0]
-            month_num = MONTHS.get(name)
-            if month_num is None and name.isdigit():
-                month_num = int(name)
-            if len(parts) > 1 and parts[1].isdigit():
-                year = int(parts[1])
-
-        if month_num is None or not 1 <= month_num <= 12:
-            return None  # signals "could not parse"
-
-        after = datetime(year, month_num, 1, tzinfo=timezone.utc)
-        label = f"{datetime(year, month_num, 1):%B %Y}"
-        return after, label, (year, month_num)
 
     @commands.hybrid_command(
         name="foodguessr",
         description="Tally FoodGuessr scores in this channel and show a leaderboard.",
     )
     @app_commands.describe(
-        month="Month to tally, e.g. 'June', 'Jun 2026' or '2026-06'. Defaults to the last 30 days.",
+        month="Month to tally, e.g. 'June', 'Jun 2026' or '2026-06'. Defaults to the previous full month.",
     )
     async def foodguessr(self, context: Context, *, month: str = None) -> None:
         """
-        Scan the current channel/thread for FoodGuessr results and post a leaderboard.
+        Tally the current channel/thread's FoodGuessr scores and post a leaderboard.
 
         :param context: The hybrid command context.
-        :param month: Optional month to tally; defaults to the last 30 days.
+        :param month: Optional month to tally; defaults to the previous full month.
         """
         window = self._resolve_window(month)
         if window is None:
@@ -206,42 +141,15 @@ class FoodGuessr(commands.Cog, name="foodguessr"):
 
         after, label, month_filter = window
 
-        # Scanning history can take a while, so let Discord know we're working.
+        # Bringing the cache up to date can take a while on the first scan.
         await context.defer()
 
-        # totals[author_id] = {"name": str, "total": int, "days": {date: score}}
-        totals: dict[int, dict] = defaultdict(
-            lambda: {"name": "", "total": 0, "days": {}}
-        )
-        parsed_messages = 0
-
         try:
-            async for message in context.channel.history(limit=None, after=after):
-                if not message.content:
-                    continue
-                result = self._parse_message(
-                    message.content, message.created_at.date()
-                )
-                if result is None:
-                    continue
-                played_on, score = result
-
-                if month_filter is not None and (
-                    played_on.year,
-                    played_on.month,
-                ) != month_filter:
-                    continue
-
-                entry = totals[message.author.id]
-                entry["name"] = message.author.display_name
-                # Keep the best score if someone posts the same day more than once.
-                existing = entry["days"].get(played_on)
-                if existing is None or score > existing:
-                    if existing is not None:
-                        entry["total"] -= existing
-                    entry["days"][played_on] = score
-                    entry["total"] += score
-                    parsed_messages += 1
+            # Scan a little before the month starts so a result dated on the 1st
+            # but posted just beforehand is still cached. Counting stays exact:
+            # dated results are tallied by their in-message date, so they land in
+            # the right month regardless of when they were posted.
+            await self._sync_channel(context.channel, after - self.SCAN_BUFFER)
         except discord.Forbidden:
             await context.send(
                 embed=discord.Embed(
@@ -256,6 +164,34 @@ class FoodGuessr(commands.Cog, name="foodguessr"):
                 )
             )
             return
+
+        rows = await self._load_window(context.channel.id, month_filter)
+
+        # Resolve each player's current server nickname from their stored id, so
+        # names stay right even after someone renames (stored name is fallback).
+        names = await self._resolve_names(
+            context.guild,
+            [row["author_id"] for row in rows],
+            {row["author_id"]: row["author_name"] for row in rows},
+        )
+
+        # totals[author_id] = {"name": str, "total": int, "days": {date: score}}
+        totals: dict[int, dict] = defaultdict(
+            lambda: {"name": "", "total": 0, "days": {}}
+        )
+
+        for row in rows:
+            played_on = row["played_on"]
+            score = row["payload"]["score"]
+            entry = totals[row["author_id"]]
+            entry["name"] = names[row["author_id"]]
+            # Keep the best score if someone posts the same day more than once.
+            existing = entry["days"].get(played_on)
+            if existing is None or score > existing:
+                if existing is not None:
+                    entry["total"] -= existing
+                entry["days"][played_on] = score
+                entry["total"] += score
 
         if not totals:
             await context.send(
@@ -313,8 +249,9 @@ class FoodGuessr(commands.Cog, name="foodguessr"):
             )
         embed.add_field(name="💯 Most perfects", value=perfect_text, inline=False)
 
+        days_tallied = sum(len(e["days"]) for e in ranking)
         embed.set_footer(
-            text=f"Period: {label} • {len(ranking)} players • {parsed_messages} results tallied"
+            text=f"Period: {label} • {len(ranking)} players • {days_tallied} results tallied"
         )
         await context.send(embed=embed)
 
