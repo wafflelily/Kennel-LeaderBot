@@ -88,18 +88,25 @@ class General(commands.Cog, name="general"):
         embed = discord.Embed(
             title="Help", description="List of available commands:", color=0xBEBEFE
         )
-        for i in self.bot.cogs:
-            if i == "owner" and not (await self.bot.is_owner(context.author)):
-                continue
-            cog = self.bot.get_cog(i.lower())
-            commands = cog.get_commands()
+        for cog_name in self.bot.cogs:
+            cog = self.bot.get_cog(cog_name.lower())
             data = []
-            for command in commands:
+            for command in cog.get_commands():
+                # Only list commands the invoker could actually run here, so
+                # owner-only or guild-only commands don't show up for people
+                # (or in places) that can't use them.
+                try:
+                    if not await command.can_run(context):
+                        continue
+                except commands.CommandError:
+                    continue
                 description = command.description.partition("\n")[0]
                 data.append(f"{command.name} - {description}")
+            if not data:
+                continue
             help_text = "\n".join(data)
             embed.add_field(
-                name=i.capitalize(), value=f"```{help_text}```", inline=False
+                name=cog_name.capitalize(), value=f"```{help_text}```", inline=False
             )
         await context.send(embed=embed)
 

@@ -3,6 +3,10 @@
 database/
 venv/
 .env
-CODE_OF_CONDUCT.md
-CONTRIBUTING.md
-UPDATES.md
+tests/
+logs/
+discord.log
+__pycache__/
+.pytest_cache/
+.idea/
+*.md

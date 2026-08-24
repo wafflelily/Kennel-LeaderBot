@@ -104,7 +104,7 @@ These build a tree of who invited whom, based on people's posts in an introducti
 
 | Command | What it does |
 |---|---|
-| `/help` | List all commands, grouped by category. (Owner commands are only shown to the owner.) |
+| `/help` | List all commands, grouped by category. Commands you can't use where you're asking (owner-only, server-only in DMs) are hidden. |
 | `/ping` | Show the bot's latency. |
 | `/botinfo` | Show bot/owner/version info. |
 | `/invite` | DM you the bot's invite link. |
