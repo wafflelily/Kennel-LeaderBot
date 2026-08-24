@@ -8,6 +8,7 @@ manual commands (each leaderboard cog's ``build_leaderboard``).
 """
 
 import datetime as dt
+import os
 
 import discord
 from discord import app_commands
@@ -16,9 +17,19 @@ from discord.ext.commands import Context
 
 from leaderboard.base import LeaderboardCog, game_choices
 
+
+def _post_hour() -> int:
+    """UTC hour for the daily check, from AUTOPOST_HOUR (default 8)."""
+    try:
+        hour = int(os.getenv("AUTOPOST_HOUR", "8"))
+    except ValueError:
+        return 8
+    return hour if 0 <= hour <= 23 else 8
+
+
 # When the daily check fires (UTC). Only the run on the 1st of a month posts;
 # if the bot is offline at that moment the post for that month is skipped.
-POST_AT = dt.time(hour=8, tzinfo=dt.timezone.utc)
+POST_AT = dt.time(hour=_post_hour(), tzinfo=dt.timezone.utc)
 
 
 class AutoPost(commands.Cog, name="autopost"):
