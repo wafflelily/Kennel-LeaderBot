@@ -1,19 +1,23 @@
 ---
 name: Feature request
-about: Suggest an idea for the template
+about: An idea for the bot — a new stat, command, or improvement
 title: ""
-labels: ""
+labels: "enhancement"
 assignees: ""
 ---
 
-**Is your feature request related to a problem? Please describe.**
-A clear and concise description of what the problem is. Ex. I'm always frustrated when [...]
+**What's the itch?**
+What's annoying, missing, or would be fun to have? Ex. "the /gauntle board doesn't show [...]"
 
-**Describe the solution you'd like**
-A clear and concise description of what you want to happen.
+**What should it do?**
+Describe the behaviour you'd like. If it changes a leaderboard or embed, a rough
+sketch of the output helps a lot.
 
-**Describe alternatives you've considered**
-A clear and concise description of any alternative solutions or features you've considered.
+**Which area?**
+Gauntle / FoodGuessr / Catfishing / invite map / `/mystats` / auto-posting / something new.
 
-**Additional context**
-Add any other context or screenshots about the feature request here.
+(For supporting a whole new daily game, use the "New game support" template instead —
+it asks for the share-text samples needed to write the parser.)
+
+**Anything else?**
+Alternatives you considered, screenshots, links.

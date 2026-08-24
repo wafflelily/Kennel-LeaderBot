@@ -30,6 +30,7 @@ import re
 from datetime import date, datetime, timedelta, timezone
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 # Matches an ISO-ish "YYYY-MM" / "YYYY/MM" month argument.
@@ -52,6 +53,37 @@ MONTHS = {
 }
 
 
+def game_choices(games, current: str) -> list[app_commands.Choice[str]]:
+    """Autocomplete choices for a ``game`` argument from the loaded game names."""
+    current = current.strip().lower()
+    return [
+        app_commands.Choice(name=game, value=game)
+        for game in sorted(games)
+        if current in game
+    ][:25]
+
+
+def month_choices(current: str) -> list[app_commands.Choice[str]]:
+    """
+    Autocomplete choices for a ``month`` argument: the last 12 months, newest
+    first, filtered by whatever the user has typed so far. Values use the
+    ``YYYY-MM`` form, which ``_resolve_window`` accepts.
+    """
+    current = current.strip().lower()
+    now = datetime.now(timezone.utc)
+    year, month = now.year, now.month
+    choices = []
+    for _ in range(12):
+        label = f"{datetime(year, month, 1):%B %Y}"
+        value = f"{year}-{month:02d}"
+        if current in label.lower() or current in value:
+            choices.append(app_commands.Choice(name=label, value=value))
+        month -= 1
+        if month == 0:
+            year, month = year - 1, 12
+    return choices
+
+
 class LeaderboardCog(commands.Cog):
     """Base class factoring out window parsing, caching and scanning."""
 
@@ -67,6 +99,10 @@ class LeaderboardCog(commands.Cog):
 
     def __init__(self, bot) -> None:
         self.bot = bot
+        # One lock per channel so two concurrent commands don't both run the
+        # same (possibly long) history scan; the second waits and then sees
+        # the first's scan state, making its own scan a cheap no-op.
+        self._sync_locks: dict[int, asyncio.Lock] = {}
 
     # ------------------------------------------------------------------ #
     # Hooks for subclasses
@@ -121,6 +157,8 @@ class LeaderboardCog(commands.Cog):
             year, month_num = int(iso.group(1)), int(iso.group(2))
         else:
             parts = text.split()
+            if not parts:
+                return None  # blank or whitespace-only argument
             name = parts[0]
             month_num = MONTHS.get(name)
             if month_num is None and name.isdigit():
@@ -221,7 +259,7 @@ class LeaderboardCog(commands.Cog):
                 *(guild.fetch_member(aid) for aid, _ in to_fetch),
                 return_exceptions=True,
             )
-            for (aid, cached), result in zip(to_fetch, fetched):
+            for (aid, cached), result in zip(to_fetch, fetched, strict=True):
                 if isinstance(result, discord.Member):
                     names[aid] = result.display_name
                 elif cached is not None:
@@ -244,40 +282,44 @@ class LeaderboardCog(commands.Cog):
         May raise ``discord.Forbidden`` if the bot can't read history — callers
         handle that and show a permissions error.
         """
-        db = self.bot.database
-        newest_id, oldest_after = await db.get_leaderboard_scan(self.GAME, channel.id)
-        after_iso = after.isoformat()
-        max_seen = newest_id
+        lock = self._sync_locks.setdefault(channel.id, asyncio.Lock())
+        async with lock:
+            db = self.bot.database
+            newest_id, oldest_after = await db.get_leaderboard_scan(
+                self.GAME, channel.id
+            )
+            after_iso = after.isoformat()
+            max_seen = newest_id
 
-        async def scan(history) -> None:
-            nonlocal max_seen
-            async for message in history:
-                if max_seen is None or message.id > max_seen:
-                    max_seen = message.id
-                if message.author.bot or not message.content:
-                    continue
-                await self._store(message)
+            async def scan(history) -> None:
+                nonlocal max_seen
+                async for message in history:
+                    if max_seen is None or message.id > max_seen:
+                        max_seen = message.id
+                    if message.author.bot or not message.content:
+                        continue
+                    await self._store(message)
 
-        if oldest_after is None:
-            # Never scanned: pull everything from `after` onwards.
-            await scan(channel.history(limit=None, after=after))
-            new_oldest = after_iso
-        else:
-            new_oldest = oldest_after
-            if after_iso < oldest_after:
-                # Requested month predates what we've scanned; backfill the gap.
-                before_dt = datetime.fromisoformat(oldest_after)
-                await scan(
-                    channel.history(limit=None, after=after, before=before_dt)
-                )
+            if oldest_after is None:
+                # Never scanned: pull everything from `after` onwards.
+                await scan(channel.history(limit=None, after=after))
                 new_oldest = after_iso
-            # Forward catch-up for anything posted since the last scan.
-            if newest_id is not None:
-                await scan(
-                    channel.history(limit=None, after=discord.Object(id=newest_id))
-                )
+            else:
+                new_oldest = oldest_after
+                if after_iso < oldest_after:
+                    # Requested month predates what we've scanned; backfill the gap.
+                    before_dt = datetime.fromisoformat(oldest_after)
+                    await scan(
+                        channel.history(limit=None, after=after, before=before_dt)
+                    )
+                    new_oldest = after_iso
+                # Forward catch-up for anything posted since the last scan.
+                if newest_id is not None:
+                    await scan(
+                        channel.history(limit=None, after=discord.Object(id=newest_id))
+                    )
 
-        await db.set_leaderboard_scan(self.GAME, channel.id, max_seen, new_oldest)
+            await db.set_leaderboard_scan(self.GAME, channel.id, max_seen, new_oldest)
 
     # ------------------------------------------------------------------ #
     # Live capture / reconciliation

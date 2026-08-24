@@ -27,7 +27,7 @@ from discord import app_commands
 from discord.ext import commands
 from discord.ext.commands import Context
 
-from leaderboard.base import MONTHS, LeaderboardCog
+from leaderboard.base import MONTHS, LeaderboardCog, month_choices
 
 # Matches a date with an optional leading weekday, capturing month abbreviation,
 # day and year. Works both inside the header line ("FoodGuessr - Thursday,
@@ -165,12 +165,43 @@ class FoodGuessr(LeaderboardCog, name="foodguessr"):
             )
             return
 
-        rows = await self._load_window(context.channel.id, month_filter)
+        embed = await self.build_leaderboard(context.channel, month_filter, label)
+        if embed is None:
+            await context.send(
+                embed=discord.Embed(
+                    title="🍽️ FoodGuessr Leaderboard",
+                    description=(
+                        f"No FoodGuessr results found for **{label}** in this channel.\n\n"
+                        "Make sure results are posted here and that I can read message "
+                        "history (the `message_content` intent must be enabled)."
+                    ),
+                    color=0xE02B2B,
+                )
+            )
+            return
+        await context.send(embed=embed)
+
+    @foodguessr.autocomplete("month")
+    async def foodguessr_month_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        return month_choices(current)
+
+    async def build_leaderboard(
+        self, channel, month_filter, label: str
+    ) -> discord.Embed | None:
+        """
+        Build the month's leaderboard embed from the cache.
+
+        Shared by the /foodguessr command and the monthly auto-poster. Returns
+        None when the channel has no results for the month.
+        """
+        rows = await self._load_window(channel.id, month_filter)
 
         # Resolve each player's current server nickname from their stored id, so
         # names stay right even after someone renames (stored name is fallback).
         names = await self._resolve_names(
-            context.guild,
+            getattr(channel, "guild", None),
             [row["author_id"] for row in rows],
             {row["author_id"]: row["author_name"] for row in rows},
         )
@@ -194,18 +225,7 @@ class FoodGuessr(LeaderboardCog, name="foodguessr"):
                 entry["total"] += score
 
         if not totals:
-            await context.send(
-                embed=discord.Embed(
-                    title="🍽️ FoodGuessr Leaderboard",
-                    description=(
-                        f"No FoodGuessr results found for **{label}** in this channel.\n\n"
-                        "Make sure results are posted here and that I can read message "
-                        "history (the `message_content` intent must be enabled)."
-                    ),
-                    color=0xE02B2B,
-                )
-            )
-            return
+            return None
 
         ranking = sorted(
             totals.values(),
@@ -253,7 +273,50 @@ class FoodGuessr(LeaderboardCog, name="foodguessr"):
         embed.set_footer(
             text=f"Period: {label} • {len(ranking)} players • {days_tallied} results tallied"
         )
-        await context.send(embed=embed)
+        return embed
+
+    def compare_stats(self, rows: list[dict], author_id: int) -> list[str] | None:
+        """
+        Comparative stats for one player against everyone in ``rows``.
+
+        Returns formatted lines for the /mystats embed, or None if the player
+        has no cached FoodGuessr results.
+        """
+        # Best score per player per day.
+        best: dict[tuple, int] = {}
+        for row in rows:
+            key = (row["author_id"], row["played_on"])
+            score = row["payload"]["score"]
+            if key not in best or score > best[key]:
+                best[key] = score
+        mine = {day: score for (pid, day), score in best.items() if pid == author_id}
+        if not mine:
+            return None
+
+        by_day: dict = defaultdict(dict)
+        for (pid, day), score in best.items():
+            by_day[day][pid] = score
+        contested = [day for day in mine if len(by_day[day]) > 1]
+        wins = sum(1 for day in contested if mine[day] == max(by_day[day].values()))
+
+        my_avg = sum(mine.values()) / len(mine)
+        channel_avg = sum(best.values()) / len(best)
+        my_perfects = sum(1 for score in mine.values() if score == PERFECT_SCORE)
+        channel_perfects = sum(
+            1 for score in best.values() if score == PERFECT_SCORE
+        )
+
+        lines = [
+            f"Days played: **{len(mine)}**",
+            f"🏆 Top score of the day: **{wins}** of {len(contested)} contested days",
+            f"📈 Average: **{my_avg:,.0f}** vs the channel's {channel_avg:,.0f} "
+            f"({my_avg - channel_avg:+,.0f})",
+        ]
+        if channel_perfects:
+            lines.append(
+                f"💯 Perfects: **{my_perfects}** of the channel's {channel_perfects}"
+            )
+        return lines
 
 
 async def setup(bot) -> None:

@@ -143,5 +143,6 @@ cython_debug/
 # SQLITE database
 *.db
 
-# Log file
+# Log files (incl. rotated backups like logs/discord.log.1)
+logs/
 discord.log

@@ -664,7 +664,7 @@ class Introductions(LeaderboardCog, name="introductions"):
         urls = {info[key]["avatar"] for key in keys if info[key]["avatar"]}
         async with aiohttp.ClientSession() as session:
             fetched = await asyncio.gather(*(fetch(session, url) for url in urls))
-        by_url = dict(zip(urls, fetched))
+        by_url = dict(zip(urls, fetched, strict=True))
         return {
             key: by_url.get(info[key]["avatar"]) if info[key]["avatar"] else None
             for key in keys

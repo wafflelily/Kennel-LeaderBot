@@ -11,7 +11,7 @@ from discord import app_commands
 from discord.ext import commands
 from discord.ext.commands import Context
 
-from leaderboard.base import LeaderboardCog
+from leaderboard.base import LeaderboardCog, game_choices
 
 
 class Owner(commands.Cog, name="owner"):
@@ -238,6 +238,17 @@ class Owner(commands.Cog, name="owner"):
                 color=0xBEBEFE,
             )
         )
+
+    @rebuild.autocomplete("game")
+    async def rebuild_game_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        games = {
+            cog.GAME
+            for cog in self.bot.cogs.values()
+            if isinstance(cog, LeaderboardCog)
+        }
+        return game_choices(games, current)
 
     @commands.hybrid_command(
         name="shutdown",

@@ -33,6 +33,7 @@ rather than re-scanning the whole channel each time.
 """
 
 import re
+from collections import defaultdict
 from datetime import date
 
 import discord
@@ -40,7 +41,7 @@ from discord import app_commands
 from discord.ext import commands
 from discord.ext.commands import Context
 
-from leaderboard.base import MONTHS, LeaderboardCog
+from leaderboard.base import MONTHS, LeaderboardCog, month_choices
 
 # Matches the header line, e.g. "I ran the August 20th Gauntle(t) in ...".
 # Group 1 is the month name, group 2 is the day. The trailing ".*?gauntle"
@@ -79,6 +80,18 @@ def _fmt_time(seconds: float) -> str:
     else:
         text = f"{secs:.2f}s"
     return f"-{text}" if negative else text
+
+
+def _effective(info) -> float:
+    """
+    Effective time of a stored category entry.
+
+    Handles both the current ``{"raw": ..., "adj": ...}`` payload shape and the
+    bare effective-time float from rows cached before raw/adj were stored.
+    """
+    if isinstance(info, dict):
+        return info["raw"] + info["adj"]
+    return info
 
 
 def _fmt_solve(raw: float | None, adj: float | None) -> str:
@@ -248,12 +261,43 @@ class Gauntle(LeaderboardCog, name="gauntle"):
             )
             return
 
-        rows = await self._load_window(context.channel.id, month_filter)
+        embed = await self.build_leaderboard(context.channel, month_filter, label)
+        if embed is None:
+            await context.send(
+                embed=discord.Embed(
+                    title="⚔️ Gauntle Leaderboard",
+                    description=(
+                        f"No Gauntle results found for **{label}** in this channel.\n\n"
+                        "Make sure results are posted here and that I can read message "
+                        "history (the `message_content` intent must be enabled)."
+                    ),
+                    color=0xE02B2B,
+                )
+            )
+            return
+        await context.send(embed=embed)
+
+    @gauntle.autocomplete("month")
+    async def gauntle_month_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        return month_choices(current)
+
+    async def build_leaderboard(
+        self, channel, month_filter, label: str
+    ) -> discord.Embed | None:
+        """
+        Build the month's leaderboard embed from the cache.
+
+        Shared by the /gauntle command and the monthly auto-poster. Returns
+        None when the channel has no results for the month.
+        """
+        rows = await self._load_window(channel.id, month_filter)
 
         # Resolve each player's current server nickname from their stored id, so
         # names stay right even after someone renames (stored name is fallback).
         names = await self._resolve_names(
-            context.guild,
+            getattr(channel, "guild", None),
             [row["author_id"] for row in rows],
             {row["author_id"]: row["author_name"] for row in rows},
         )
@@ -301,18 +345,7 @@ class Gauntle(LeaderboardCog, name="gauntle"):
                     }
 
         if not runs:
-            await context.send(
-                embed=discord.Embed(
-                    title="⚔️ Gauntle Leaderboard",
-                    description=(
-                        f"No Gauntle results found for **{label}** in this channel.\n\n"
-                        "Make sure results are posted here and that I can read message "
-                        "history (the `message_content` intent must be enabled)."
-                    ),
-                    color=0xE02B2B,
-                )
-            )
-            return
+            return None
 
         # Fastest 3 overall times (each person's best run).
         ranking = sorted(runs.values(), key=lambda e: e["best"])[:3]
@@ -361,7 +394,73 @@ class Gauntle(LeaderboardCog, name="gauntle"):
         embed.set_footer(
             text=f"Period: {label} • {len(runs)} players • {len(rows)} runs tallied"
         )
-        await context.send(embed=embed)
+        return embed
+
+    def compare_stats(self, rows: list[dict], author_id: int) -> list[str] | None:
+        """
+        Comparative stats for one player against everyone in ``rows``.
+
+        Returns formatted lines for the /mystats embed, or None if the player
+        has no cached Gauntle runs.
+        """
+        # Best (fastest) run per player per day.
+        best: dict[tuple, float] = {}
+        for row in rows:
+            key = (row["author_id"], row["played_on"])
+            total = row["payload"]["total"]
+            if key not in best or total < best[key]:
+                best[key] = total
+        mine = {day: total for (pid, day), total in best.items() if pid == author_id}
+        if not mine:
+            return None
+
+        by_day: dict = defaultdict(dict)
+        for (pid, day), total in best.items():
+            by_day[day][pid] = total
+        contested = [day for day in mine if len(by_day[day]) > 1]
+        wins = sum(1 for day in contested if mine[day] == min(by_day[day].values()))
+
+        my_avg = sum(mine.values()) / len(mine)
+        channel_avg = sum(best.values()) / len(best)
+        diff = my_avg - channel_avg
+        if abs(diff) < 0.005:
+            comparison = "level with"
+        else:
+            comparison = (
+                f"{_fmt_time(abs(diff))} {'faster' if diff < 0 else 'slower'} than"
+            )
+
+        # Category records: who holds the channel's best effective time.
+        channel_best: dict[str, float] = {}
+        my_best: dict[str, float] = {}
+        for row in rows:
+            for name, info in row["payload"].get("categories", {}).items():
+                effective = _effective(info)
+                if name not in channel_best or effective < channel_best[name]:
+                    channel_best[name] = effective
+                if row["author_id"] == author_id and (
+                    name not in my_best or effective < my_best[name]
+                ):
+                    my_best[name] = effective
+        held = sorted(
+            name for name, effective in my_best.items()
+            if effective == channel_best[name]
+        )
+
+        lines = [
+            f"Days run: **{len(mine)}**",
+            f"🏆 Fastest of the day: **{wins}** of {len(contested)} contested days",
+            f"⚡ Average run: **{_fmt_time(my_avg)}** — {comparison} the "
+            f"channel's {_fmt_time(channel_avg)}",
+        ]
+        if held:
+            lines.append(
+                f"👑 Category bests held: **{', '.join(held)}** "
+                f"({len(held)} of {len(channel_best)})"
+            )
+        else:
+            lines.append("👑 Category bests held: none right now")
+        return lines
 
 
 async def setup(bot) -> None:

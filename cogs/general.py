@@ -7,6 +7,7 @@ Version: 6.5.0
 """
 
 import platform
+
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -117,7 +118,7 @@ class General(commands.Cog, name="general"):
             color=0xBEBEFE,
         )
         embed.set_author(name="Bot Information")
-        embed.add_field(name="Owner:", value="batterysnek", inline=True)
+        embed.add_field(name="Owner:", value=self.bot.owner_name, inline=True)
         embed.add_field(
             name="Python Version:", value=f"{platform.python_version()}", inline=True
         )

@@ -108,6 +108,40 @@ class DatabaseManager:
         await self.connection.commit()
         return removed
 
+    async def set_autopost(self, game: str, channel_id: int, enabled: bool) -> None:
+        """Opt a channel in or out of the monthly automatic leaderboard post."""
+        if enabled:
+            await self.connection.execute(
+                "INSERT OR IGNORE INTO leaderboard_autopost (game, channel_id) "
+                "VALUES (?, ?)",
+                (game, str(channel_id)),
+            )
+        else:
+            await self.connection.execute(
+                "DELETE FROM leaderboard_autopost WHERE game=? AND channel_id=?",
+                (game, str(channel_id)),
+            )
+        await self.connection.commit()
+
+    async def get_autopost_channels(self, game: str) -> list[int]:
+        """Return the channels opted in to monthly auto-posts for a game."""
+        rows = await self.connection.execute(
+            "SELECT channel_id FROM leaderboard_autopost WHERE game=?", (game,)
+        )
+        async with rows as cursor:
+            result = await cursor.fetchall()
+        return [int(row[0]) for row in result]
+
+    async def get_autopost_games(self, channel_id: int) -> list[str]:
+        """Return the games a channel is opted in to monthly auto-posts for."""
+        rows = await self.connection.execute(
+            "SELECT game FROM leaderboard_autopost WHERE channel_id=?",
+            (str(channel_id),),
+        )
+        async with rows as cursor:
+            result = await cursor.fetchall()
+        return [row[0] for row in result]
+
     # ------------------------------------------------------------------ #
     # Introductions / invite map (all keyed by server so data stays siloed)
     # ------------------------------------------------------------------ #

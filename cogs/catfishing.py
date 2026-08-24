@@ -43,7 +43,7 @@ from discord import app_commands
 from discord.ext import commands
 from discord.ext.commands import Context
 
-from leaderboard.base import LeaderboardCog
+from leaderboard.base import LeaderboardCog, month_choices
 
 # The three result symbols. Cats are correct, eggs are "close enough", fish are
 # wrong. Cats and eggs both count as the group getting that question.
@@ -257,11 +257,42 @@ class Catfishing(LeaderboardCog, name="catfishing"):
             )
             return
 
+        embed = await self.build_leaderboard(context.channel, month_filter, label)
+        if embed is None:
+            await context.send(
+                embed=discord.Embed(
+                    title="🐈 Catfishing Leaderboard",
+                    description=(
+                        f"No Catfishing results found for **{label}** in this channel.\n\n"
+                        "Make sure results are posted here and that I can read message "
+                        "history (the `message_content` intent must be enabled)."
+                    ),
+                    color=0xE02B2B,
+                )
+            )
+            return
+        await context.send(embed=embed)
+
+    @catfishing.autocomplete("month")
+    async def catfishing_month_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        return month_choices(current)
+
+    async def build_leaderboard(
+        self, channel, month_filter, label: str
+    ) -> discord.Embed | None:
+        """
+        Build the month's leaderboard embed from the cache.
+
+        Shared by the /catfishing command and the monthly auto-poster. Returns
+        None when the channel has no results for the month.
+        """
         # Load every cached result and attribute each to a month by its puzzle
         # number's real date, rather than the post date. This keeps boundary and
         # catch-up posts in the month they were actually played, and stops a
         # puzzle from a neighbouring month being counted here by accident.
-        all_rows = await self._load_all(context.channel.id)
+        all_rows = await self._load_all(channel.id)
         anchor = self._date_anchor(all_rows)
         rows = []
         for row in all_rows:
@@ -275,7 +306,7 @@ class Catfishing(LeaderboardCog, name="catfishing"):
         # Resolve each player's current server nickname from their stored id, so
         # names stay right even after someone renames (stored name is fallback).
         names = await self._resolve_names(
-            context.guild,
+            getattr(channel, "guild", None),
             [row["author_id"] for row in rows],
             {row["author_id"]: row["author_name"] for row in rows},
         )
@@ -311,18 +342,7 @@ class Catfishing(LeaderboardCog, name="catfishing"):
                 puzzle_date[puzzle] = played_on
 
         if not players:
-            await context.send(
-                embed=discord.Embed(
-                    title="🐈 Catfishing Leaderboard",
-                    description=(
-                        f"No Catfishing results found for **{label}** in this channel.\n\n"
-                        "Make sure results are posted here and that I can read message "
-                        "history (the `message_content` intent must be enabled)."
-                    ),
-                    color=0xE02B2B,
-                )
-            )
-            return
+            return None
 
         # Build per-player stats and rank by total, then by days played.
         ranking = sorted(
@@ -382,7 +402,7 @@ class Catfishing(LeaderboardCog, name="catfishing"):
             fetched = await asyncio.gather(
                 *(self._fetch_puzzle(session, day) for day in solvers)
             )
-        puzzle_stats = dict(zip(solvers, fetched))
+        puzzle_stats = dict(zip(solvers, fetched, strict=True))
 
         answers = []  # (rate, title, puzzle, names)
         for puzzle, positions in solvers.items():
@@ -413,7 +433,58 @@ class Catfishing(LeaderboardCog, name="catfishing"):
         embed.set_footer(
             text=f"Period: {label} • {len(ranking)} players • {len(aggregates)} days played"
         )
-        await context.send(embed=embed)
+        return embed
+
+    def compare_stats(self, rows: list[dict], author_id: int) -> list[str] | None:
+        """
+        Comparative stats for one player against everyone in ``rows``.
+
+        Returns formatted lines for the /mystats embed, or None if the player
+        has no cached Catfishing results. Comparisons only consider "shared"
+        puzzles — ones at least two people posted — so playing alone doesn't
+        inflate anything.
+        """
+        # Correct question indexes per player per puzzle (union of reposts),
+        # and each player's best score per puzzle.
+        corrects: dict[int, dict[int, set]] = defaultdict(lambda: defaultdict(set))
+        scores: dict[tuple, float] = {}
+        for row in rows:
+            puzzle = row["payload"]["puzzle"]
+            pid = row["author_id"]
+            corrects[puzzle][pid] |= set(row["payload"]["correct"])
+            key = (pid, puzzle)
+            score = row["payload"]["score"]
+            if key not in scores or score > scores[key]:
+                scores[key] = score
+        mine = {p: score for (pid, p), score in scores.items() if pid == author_id}
+        if not mine:
+            return None
+
+        shared = [p for p in mine if len(corrects[p]) > 1]
+        unique_solves = sum(
+            len(
+                corrects[p][author_id]
+                - set().union(
+                    *(c for pid, c in corrects[p].items() if pid != author_id)
+                )
+            )
+            for p in shared
+        )
+        wins = sum(
+            1
+            for p in shared
+            if mine[p] == max(scores[(pid, p)] for pid in corrects[p])
+        )
+        my_avg = sum(mine.values()) / len(mine)
+        channel_avg = sum(scores.values()) / len(scores)
+
+        return [
+            f"Days played: **{len(mine)}**",
+            f"🎯 Answers nobody else got: **{unique_solves}** "
+            f"across {len(shared)} shared puzzles",
+            f"🏆 Top score of the day: **{wins}** of {len(shared)} shared puzzles",
+            f"📈 Average: **{my_avg:.2f}/10** vs the channel's {channel_avg:.2f}/10",
+        ]
 
 
 async def setup(bot) -> None:

@@ -10,6 +10,7 @@ import logging
 import os
 import platform
 import random
+from logging.handlers import RotatingFileHandler
 
 import aiosqlite
 import discord
@@ -117,8 +118,15 @@ logger.setLevel(logging.INFO)
 # Console handler
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(LoggingFormatter())
-# File handler
-file_handler = logging.FileHandler(filename="discord.log", encoding="utf-8", mode="w")
+# File handler — rotated so history survives restarts without growing unbounded.
+_logs_dir = os.path.join(os.path.realpath(os.path.dirname(__file__)), "logs")
+os.makedirs(_logs_dir, exist_ok=True)
+file_handler = RotatingFileHandler(
+    filename=os.path.join(_logs_dir, "discord.log"),
+    encoding="utf-8",
+    maxBytes=5 * 1024 * 1024,
+    backupCount=3,
+)
 file_handler_formatter = logging.Formatter(
     "[{asctime}] [{levelname:<8}] {name}: {message}", "%Y-%m-%d %H:%M:%S", style="{"
 )
@@ -148,6 +156,15 @@ class DiscordBot(commands.Bot):
         self.database = None
         self.bot_prefix = os.getenv("PREFIX")
         self.invite_link = os.getenv("INVITE_LINK")
+        # Shown by /botinfo; override with the OWNER_NAME env var.
+        self.owner_name = os.getenv("OWNER_NAME", "batterysnek")
+        # Rotating "Playing ..." statuses; override with a comma-separated
+        # STATUSES env var.
+        self.statuses = [
+            status.strip()
+            for status in os.getenv("STATUSES", "").split(",")
+            if status.strip()
+        ] or ["Battery is so cool", "mmm, food", "le catfishing"]
 
     async def init_db(self) -> None:
         async with aiosqlite.connect(
@@ -181,8 +198,9 @@ class DiscordBot(commands.Bot):
         """
         Setup the game status task of the bot.
         """
-        statuses = ["Battery is so cool", "mmm, food", "le catfishing"]
-        await self.change_presence(activity=discord.Game(random.choice(statuses)))
+        await self.change_presence(
+            activity=discord.Game(random.choice(self.statuses))
+        )
 
     @status_task.before_loop
     async def before_status_task(self) -> None:
@@ -293,8 +311,38 @@ class DiscordBot(commands.Bot):
             )
             await context.send(embed=embed)
         else:
-            raise error
+            # Anything unexpected: log the traceback and tell the user, so a
+            # deferred slash command doesn't hang on "thinking..." forever.
+            original = getattr(error, "original", error)
+            command_name = (
+                context.command.qualified_name if context.command else "unknown"
+            )
+            self.logger.error(
+                f"Unhandled exception in the {command_name} command:",
+                exc_info=original,
+            )
+            embed = discord.Embed(
+                title="Error!",
+                description=(
+                    "Something went wrong while running that command. "
+                    "The error has been logged."
+                ),
+                color=0xE02B2B,
+            )
+            try:
+                await context.send(embed=embed)
+            except discord.HTTPException:
+                pass  # interaction expired or channel unwritable; already logged
 
 
-bot = DiscordBot()
-bot.run(os.getenv("TOKEN"))
+# Guarded so importing this module can never start the bot by accident.
+if __name__ == "__main__":
+    for required in ("TOKEN", "PREFIX"):
+        if not os.getenv(required):
+            raise SystemExit(
+                f"The {required} environment variable is not set - "
+                "add it to your .env file (see the README)."
+            )
+
+    bot = DiscordBot()
+    bot.run(os.getenv("TOKEN"))

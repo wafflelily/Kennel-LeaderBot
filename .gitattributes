@@ -1,0 +1,6 @@
+# Normalize line endings: store LF in the repo, let editors do what they like.
+* text=auto
+
+# Never touch binary files.
+*.db binary
+*.png binary

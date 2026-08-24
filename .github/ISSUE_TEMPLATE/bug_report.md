@@ -1,30 +1,29 @@
 ---
 name: Bug report
-about: Create a report to help improve the template
+about: Something's broken, or a result isn't being counted
 title: ""
-labels: ""
+labels: "bug"
 assignees: ""
 ---
 
-**Describe the bug**
-A clear and concise description of what the bug is.
+**What happened?**
+What went wrong, and what did you expect instead?
 
-**To Reproduce**
-Steps to reproduce the behavior:
+**Which command?**
+The command and arguments you ran, e.g. `/gauntle month: June` or `/invitemap`.
 
-1. Given the following code ...
-2. Using the following command '...'
-3. Given the following arguments '...'
-4. See error
+**If a result wasn't counted: paste the exact message**
+The parsers are picky about formatting, so paste the shared result *exactly* as it
+appears in Discord, inside a code block (emoji, punctuation and line breaks all matter):
 
-**Expected behavior**
-A clear and concise description of what you expected to happen.
+```
+paste the share text here
+```
 
-**Screenshots**
-If applicable, add screenshots to help explain your problem.
+Also note roughly when it was posted and in which channel, so it can be found again.
 
-**Template Version**
-The version of the template that you are using.
+**Log excerpt**
+If you're hosting the bot: any relevant lines from `logs/discord.log` around the time it happened.
 
-**Additional context**
-Add any other context about the problem here.
+**Anything else?**
+Screenshots of the wrong leaderboard/output, whether `/rebuild` was tried, etc.

@@ -42,6 +42,14 @@ CREATE TABLE IF NOT EXISTS `invite_overrides` (
   PRIMARY KEY (`server_id`, `member_id`)
 );
 
+-- Channels that get an automatic leaderboard post for a game on the 1st of
+-- each month (opted in via /autopost).
+CREATE TABLE IF NOT EXISTS `leaderboard_autopost` (
+  `game` TEXT NOT NULL,
+  `channel_id` TEXT NOT NULL,
+  PRIMARY KEY (`game`, `channel_id`)
+);
+
 -- Tracks how much of each channel's history has already been scanned per game,
 -- so a command only fetches messages it hasn't seen instead of re-scanning the
 -- whole channel every time.

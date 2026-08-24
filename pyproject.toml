@@ -1,0 +1,14 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+
+[tool.ruff.lint]
+# Pyflakes/pycodestyle errors, bugbear and import sorting; kept deliberately
+# modest so CI failures mean something is actually wrong.
+select = ["E4", "E7", "E9", "F", "B", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# The `walk` closures are defined and called within the same loop iteration,
+# so the late binding that B023 warns about can't misfire.
+"cogs/introductions.py" = ["B023"]
