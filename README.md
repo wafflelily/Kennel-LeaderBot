@@ -71,7 +71,7 @@ Each leaderboard command scans the channel it's run in, so run it in the channel
 |---|---|
 | `/catfishing [month]` | Leaderboard for [catfishing.net](https://catfishing.net) scores posted in this channel. Ranks players by total points with days played, average, and personal best, plus a "Group best" day and a "Hardest answers" section showing globally-difficult questions someone in the channel got right. |
 | `/foodguessr [month]` | Leaderboard for FoodGuessr scores posted in this channel. Ranks players by total points (best score per day if someone posts twice), with days played, average, and a "Most perfects" count of 15,000-point games. |
-| `/gauntle [month]` | Leaderboard for Gauntle runs posted in this channel. Shows the top 3 fastest overall runs and a per-category table of the best effective time in each of the 11 puzzle categories and who set it. |
+| `/gauntle [month]` | Leaderboard for Gauntle runs posted in this channel. Shows the top 3 fastest overall runs and a per-category table with, for each of the 11 puzzle categories, the best effective time, the actual solve time with its bonus/penalty (e.g. `0:50.58 (−10s)`), and who set it. |
 
 The optional `month` argument accepts formats like `June`, `Jun 2026`, `2026-06`, or `6`. If omitted, it defaults to the **previous** calendar month (or the current month when run on its last day).
 
@@ -155,7 +155,7 @@ Cog-specific twists on top of this:
 
 - **Catfishing** doesn't trust post dates. Because puzzles are numbered daily, it statistically infers a puzzle-number→date anchor from the whole channel and derives every result's true date from its puzzle number — so late or backfilled posts land in the right month. It also calls the public `catfishing.net` API (cached per puzzle) to find each day's globally hardest questions for the "Hardest answers" field.
 - **FoodGuessr** prefers a date embedded in the share text (e.g. `FoodGuessr - Thursday, Jun 18, 2026 UTC`) over the post date, and keeps only each player's best score per day.
-- **Gauntle** parses per-category times with bonus/penalty adjustments (including the skip penalty) into *effective* times. The share text states the run's date without a year ("I ran the June 18th Gauntlet…"), so the bot infers it: it picks whichever year makes that date fall closest to the day the message was posted — which gets December/January boundary posts right.
+- **Gauntle** stores each category's raw solve time and its bonus/penalty adjustment (including the skip penalty) separately; rankings use the *effective* time (raw + adjustment), and the per-category table shows both — the effective time and the actual solve with its adjustment. The share text states the run's date without a year ("I ran the June 18th Gauntlet…"), so the bot infers it: it picks whichever year makes that date fall closest to the day the message was posted — which gets December/January boundary posts right.
 - **Introductions** scans the full channel history rather than a month window. Resolving "invited by" text to an actual user uses a precedence chain: manual override (`/setinviter`) → an actual @mention in the intro → a taught alias (`/identify`) → a unique fuzzy match against member and intro names → otherwise flagged as unknown for `/whois`. The tree rendering prunes departed members' dead branches (keeping them only when a still-present member sits somewhere in their subtree) and splits oversized subtrees across multiple PNGs to stay within Discord's attachment limits.
 
 ### Database (`database/`)

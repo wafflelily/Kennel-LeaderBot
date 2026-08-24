@@ -81,6 +81,22 @@ def _fmt_time(seconds: float) -> str:
     return f"-{text}" if negative else text
 
 
+def _fmt_solve(raw: float | None, adj: float | None) -> str:
+    """
+    Format a raw solve time with its adjustment, e.g. ``0:50.58 (−10s)``.
+
+    Returns "" for results cached before raw/adj were stored (fixable with
+    ``/rebuild gauntle``). The adjustment is omitted when there wasn't one.
+    """
+    if raw is None:
+        return ""
+    text = _fmt_time(raw)
+    if adj:
+        sign = "−" if adj < 0 else "+"
+        text += f" ({sign}{abs(adj):g}s)"
+    return text
+
+
 class Gauntle(LeaderboardCog, name="gauntle"):
     GAME = "gauntle"
 
@@ -137,8 +153,9 @@ class Gauntle(LeaderboardCog, name="gauntle"):
         Parse a Gauntle result into ``(played_on, payload)`` for the cache.
 
         ``payload`` holds the run's ``total`` seconds and a ``categories`` map of
-        category name to effective time (raw time plus its bonus/penalty).
-        Returns None if the message isn't a Gauntle result.
+        category name to ``{"raw": solve seconds, "adj": bonus/penalty seconds}``
+        (effective time = raw + adj). Returns None if the message isn't a
+        Gauntle result.
         """
         header = HEADER_RE.search(content)
         if header is None:
@@ -156,7 +173,7 @@ class Gauntle(LeaderboardCog, name="gauntle"):
         if total is None:
             return None
 
-        categories: dict[str, float] = {}
+        categories: dict[str, dict] = {}
         for line in content.splitlines():
             match = CATEGORY_RE.search(line)
             if match is None:
@@ -164,11 +181,12 @@ class Gauntle(LeaderboardCog, name="gauntle"):
             name = match.group(1)
             minutes = int(match.group(2)) if match.group(2) else 0
             raw = minutes * 60 + float(match.group(3))
-            effective = raw + self._parse_adjustment(match.group(4))
+            adj = self._parse_adjustment(match.group(4))
             # Keep the person's best (lowest) effective time per category if a
             # category somehow appears twice in one message.
-            if name not in categories or effective < categories[name]:
-                categories[name] = effective
+            current = categories.get(name)
+            if current is None or raw + adj < current["raw"] + current["adj"]:
+                categories[name] = {"raw": raw, "adj": adj}
             # A run only has CATEGORIES_PER_RUN categories; stop once we've got
             # them all so trailing text isn't parsed as extra categories.
             if len(categories) >= CATEGORIES_PER_RUN:
@@ -263,11 +281,21 @@ class Gauntle(LeaderboardCog, name="gauntle"):
                 entry["date"] = played_on
 
             # Track the best (lowest) effective time in each category.
-            for name, effective in categories.items():
+            for name, info in categories.items():
+                if isinstance(info, dict):
+                    raw, adj = info["raw"], info["adj"]
+                    effective = raw + adj
+                else:
+                    # Row cached before raw/adj were stored separately; only the
+                    # effective time is known (/rebuild gauntle re-parses these).
+                    raw, adj = None, None
+                    effective = info
                 current = category_best.get(name)
                 if current is None or effective < current["time"]:
                     category_best[name] = {
                         "time": effective,
+                        "raw": raw,
+                        "adj": adj,
                         "name": display,
                         "date": played_on,
                     }
@@ -301,17 +329,26 @@ class Gauntle(LeaderboardCog, name="gauntle"):
             color=0xBEBEFE,
         )
 
-        # Best recorded time in each category (effective, incl. bonus/penalty),
-        # laid out as an aligned monospace table: Category | Time | Player.
+        # Best effective time in each category, alongside the actual solve time
+        # and its bonus/penalty, laid out as an aligned monospace table:
+        # Category | Best | Solve (adj) | Player.
+        header = ("Category", "Best", "Solve (adj)", "Player")
         cat_rows = [
-            (name, _fmt_time(info["time"]), info["name"])
+            (
+                name,
+                _fmt_time(info["time"]),
+                _fmt_solve(info["raw"], info["adj"]),
+                info["name"],
+            )
             for name, info in category_best.items()
         ]
-        cat_w = max(len(r[0]) for r in cat_rows)
-        time_w = max(len(r[1]) for r in cat_rows)
+        widths = [
+            max(len(row[col]) for row in [header, *cat_rows]) for col in range(3)
+        ]
         table = [
-            f"{cat:<{cat_w}}  {time_text:>{time_w}}  {player}"
-            for cat, time_text, player in cat_rows
+            f"{cat:<{widths[0]}}  {time_text:>{widths[1]}}  "
+            f"{solve_text:<{widths[2]}}  {player}"
+            for cat, time_text, solve_text, player in [header, *cat_rows]
         ]
 
         value = "```\n" + "\n".join(table) + "\n```"
