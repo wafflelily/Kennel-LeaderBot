@@ -435,14 +435,17 @@ class Catfishing(LeaderboardCog, name="catfishing"):
         )
         return embed
 
-    def compare_stats(self, rows: list[dict], author_id: int) -> list[str] | None:
+    async def compare_stats(self, rows: list[dict], author_id: int) -> list[str] | None:
         """
         Comparative stats for one player against everyone in ``rows``.
 
         Returns formatted lines for the /mystats embed, or None if the player
         has no cached Catfishing results. Comparisons only consider "shared"
         puzzles — ones at least two people posted — so playing alone doesn't
-        inflate anything.
+        inflate anything. The player's unique solves (answers nobody else in
+        the channel got) are ranked by global solve rate from catfishing.net
+        and the standouts at both ends are listed; if the API is unreachable
+        the counts still work, only the lists are skipped.
         """
         # Correct question indexes per player per puzzle (union of reposts),
         # and each player's best score per puzzle.
@@ -461,15 +464,16 @@ class Catfishing(LeaderboardCog, name="catfishing"):
             return None
 
         shared = [p for p in mine if len(corrects[p]) > 1]
-        unique_solves = sum(
-            len(
-                corrects[p][author_id]
-                - set().union(
-                    *(c for pid, c in corrects[p].items() if pid != author_id)
-                )
+        # unique_positions[puzzle] = question indexes only this player got.
+        unique_positions: dict[int, set] = {}
+        for p in shared:
+            others = set().union(
+                *(c for pid, c in corrects[p].items() if pid != author_id)
             )
-            for p in shared
-        )
+            unique = corrects[p][author_id] - others
+            if unique:
+                unique_positions[p] = unique
+        unique_solves = sum(len(positions) for positions in unique_positions.values())
         wins = sum(
             1
             for p in shared
@@ -478,13 +482,49 @@ class Catfishing(LeaderboardCog, name="catfishing"):
         my_avg = sum(mine.values()) / len(mine)
         channel_avg = sum(scores.values()) / len(scores)
 
-        return [
+        lines = [
             f"Days played: **{len(mine)}**",
             f"🎯 Answers nobody else got: **{unique_solves}** "
             f"across {len(shared)} shared puzzles",
             f"🏆 Top score of the day: **{wins}** of {len(shared)} shared puzzles",
             f"📈 Average: **{my_avg:.2f}/10** vs the channel's {channel_avg:.2f}/10",
         ]
+
+        # Rank the unique solves by how many players worldwide got them, and
+        # show the standouts: the hardest (impressive) and the easiest (the
+        # gimmes everyone else in the channel somehow missed).
+        answers = []  # (rate, title, puzzle)
+        if unique_positions:
+            async with aiohttp.ClientSession() as session:
+                fetched = await asyncio.gather(
+                    *(self._fetch_puzzle(session, day) for day in unique_positions)
+                )
+            for (puzzle, positions), stats in zip(
+                unique_positions.items(), fetched, strict=True
+            ):
+                if stats is None:
+                    continue
+                titles, rates = stats
+                for position in positions:
+                    if position >= len(rates) or rates[position] is None:
+                        continue
+                    title = titles[position] if position < len(titles) else "?"
+                    if len(title) > 48:
+                        title = title[:47] + "…"
+                    answers.append((rates[position], title, puzzle))
+        if answers:
+            answers.sort(key=lambda a: a[0])
+            hardest = answers[:HARDEST_COUNT]
+            # Easiest from the other end, never overlapping the hardest list.
+            easiest = list(reversed(answers[HARDEST_COUNT:]))[:HARDEST_COUNT]
+            lines.append("**Hardest answers nobody else got** (global solve rate)")
+            lines += [f"• {title} — {rate:.1f}% (#{p})" for rate, title, p in hardest]
+            if easiest:
+                lines.append("**Easiest answers nobody else got**")
+                lines += [
+                    f"• {title} — {rate:.1f}% (#{p})" for rate, title, p in easiest
+                ]
+        return lines
 
 
 async def setup(bot) -> None:

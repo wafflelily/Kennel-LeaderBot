@@ -275,7 +275,7 @@ class FoodGuessr(LeaderboardCog, name="foodguessr"):
         )
         return embed
 
-    def compare_stats(self, rows: list[dict], author_id: int) -> list[str] | None:
+    async def compare_stats(self, rows: list[dict], author_id: int) -> list[str] | None:
         """
         Comparative stats for one player against everyone in ``rows``.
 

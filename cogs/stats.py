@@ -77,7 +77,7 @@ class Stats(commands.Cog, name="stats"):
             except discord.Forbidden:
                 continue
             rows = await cog._load_all(context.channel.id)
-            lines = cog.compare_stats(rows, context.author.id)
+            lines = await cog.compare_stats(rows, context.author.id)
             if lines:
                 fields.append((name.title(), lines))
 
