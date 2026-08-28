@@ -68,6 +68,10 @@ pytest
 
 The suite covers every game's result parser (including the year/date inference edge cases), month-window resolution, the incremental scan engine and live-capture listeners (against fake channels), the invite-map resolution pipeline (inviter precedence, tree building, pruning, image splitting), and the database layer (against an in-memory SQLite database). Nothing touches Discord, so the tests run offline in under a second.
 
+### Versioning
+
+The bot's version lives in the `VERSION` file (shown by `/botinfo` and logged at startup). The **minor** version bumps automatically: on every push to `main`, a GitHub Action increments it and commits the bump back — so pull after pushing to pick it up locally. Bump the **major** version manually by editing the file (e.g. to `2.0`); automatic bumps then continue from there.
+
 ---
 
 ## Commands

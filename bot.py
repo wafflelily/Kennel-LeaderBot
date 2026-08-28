@@ -158,6 +158,17 @@ class DiscordBot(commands.Bot):
         self.invite_link = os.getenv("INVITE_LINK")
         # Shown by /botinfo; override with the OWNER_NAME env var.
         self.owner_name = os.getenv("OWNER_NAME", "batterysnek")
+        # Bot version, maintained in the VERSION file (the minor is bumped
+        # automatically by the bump-version workflow on every push to main;
+        # bump the major by editing the file).
+        try:
+            with open(
+                f"{os.path.realpath(os.path.dirname(__file__))}/VERSION",
+                encoding="utf-8",
+            ) as file:
+                self.version = file.read().strip() or "unknown"
+        except OSError:
+            self.version = "unknown"
         # Rotating "Playing ..." statuses; override with a comma-separated
         # STATUSES env var.
         self.statuses = [
@@ -214,6 +225,7 @@ class DiscordBot(commands.Bot):
         This will just be executed when the bot starts the first time.
         """
         self.logger.info(f"Logged in as {self.user.name}")
+        self.logger.info(f"Bot version: {self.version}")
         self.logger.info(f"discord.py API version: {discord.__version__}")
         self.logger.info(f"Python version: {platform.python_version()}")
         self.logger.info(
