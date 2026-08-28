@@ -117,6 +117,15 @@ class LeaderboardCog(commands.Cog):
         """
         raise NotImplementedError
 
+    async def on_result_captured(
+        self, message: discord.Message, played_on: date, payload: dict
+    ) -> None:
+        """
+        Hook: a *new* result was just captured live from chat (never during a
+        history scan or an edit, so reacting here can't replay old news).
+        Called after the result is stored. No-op by default.
+        """
+
     # ------------------------------------------------------------------ #
     # Window resolution (identical across all three games)
     # ------------------------------------------------------------------ #
@@ -355,6 +364,7 @@ class LeaderboardCog(commands.Cog):
             await self.bot.database.set_leaderboard_scan(
                 self.GAME, message.channel.id, message.id, oldest_after
             )
+        await self.on_result_captured(message, played_on, payload)
 
     @commands.Cog.listener()
     async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent) -> None:

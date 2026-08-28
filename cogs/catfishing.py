@@ -60,6 +60,9 @@ SCORE_RE = re.compile(r"#?(\d+)\s*-\s*(\d+(?:\.\d+)?)\s*/\s*10\b")
 # Per-puzzle stats endpoint. The `day` query param is the puzzle number shown
 # in the shared result (e.g. "#714" -> day=714).
 API_URL = "https://catfishing.net/api/game?day={day}"
+
+# Posted the moment a puzzle's group coverage reaches all 10 questions.
+GROUP_COMPLETE_MESSAGE = "🎉🐈🔟🐈🎉"
 # How many of the hardest answers to show.
 HARDEST_COUNT = 5
 
@@ -171,6 +174,40 @@ class Catfishing(LeaderboardCog, name="catfishing"):
         puzzle = int(match.group(1))
         score, correct = grid
         return posted_on, {"puzzle": puzzle, "score": score, "correct": correct}
+
+    async def on_result_captured(self, message, played_on, payload) -> None:
+        """
+        Celebrate a group 10/10 the moment it happens.
+
+        When a freshly posted result is the one that completes the group's
+        coverage of a puzzle (every question answered by *someone*, cats and
+        eggs both counting), post a small emoji-only congratulations. Only
+        fires for live messages — history scans replaying old completions
+        never end up here — and only for the completing message, so it can't
+        double-post when later results re-cover already-covered questions.
+        """
+        mine = set(payload["correct"])
+        if not mine:
+            return
+        puzzle = payload["puzzle"]
+        rows = await self._load_all(message.channel.id)
+        covered_before = set().union(
+            set(),
+            *(
+                row["payload"]["correct"]
+                for row in rows
+                if row["payload"]["puzzle"] == puzzle
+                and row["message_id"] != message.id
+            ),
+        )
+        if len(covered_before) >= QUESTIONS:
+            return  # already complete before this message
+        if len(covered_before | mine) < QUESTIONS:
+            return  # still not complete
+        try:
+            await message.channel.send(GROUP_COMPLETE_MESSAGE)
+        except discord.HTTPException:
+            pass  # can't send here; the leaderboard still counts it
 
     @staticmethod
     def _date_anchor(rows) -> int | None:
@@ -517,10 +554,10 @@ class Catfishing(LeaderboardCog, name="catfishing"):
             hardest = answers[:HARDEST_COUNT]
             # Easiest from the other end, never overlapping the hardest list.
             easiest = list(reversed(answers[HARDEST_COUNT:]))[:HARDEST_COUNT]
-            lines.append("**Hardest answers nobody else got** (global solve rate)")
+            lines.append("### Hardest answers nobody else got")
             lines += [f"• {title} — {rate:.1f}% (#{p})" for rate, title, p in hardest]
             if easiest:
-                lines.append("**Easiest answers nobody else got**")
+                lines.append("### Easiest answers nobody else got")
                 lines += [
                     f"• {title} — {rate:.1f}% (#{p})" for rate, title, p in easiest
                 ]

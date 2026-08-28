@@ -18,6 +18,29 @@ from discord.ext.commands import Context
 from leaderboard.base import LeaderboardCog, game_choices
 
 
+def split_fields(name: str, lines: list[str]) -> list[tuple[str, str]]:
+    """
+    Split one game's stat lines into ``(field name, field value)`` pairs.
+
+    Discord doesn't render markdown headers inside embeds, so a cog marks a
+    sub-header by starting a line with ``### ``; each becomes its own field
+    name (which Discord styles like the game's own title), with the following
+    lines as that field's value.
+    """
+    fields: list[tuple[str, str]] = []
+    current_name, chunk = name, []
+    for line in lines:
+        if line.startswith("### "):
+            if chunk:
+                fields.append((current_name, "\n".join(chunk)))
+            current_name, chunk = line[4:], []
+        else:
+            chunk.append(line)
+    if chunk:
+        fields.append((current_name, "\n".join(chunk)))
+    return fields
+
+
 class Stats(commands.Cog, name="stats"):
     def __init__(self, bot) -> None:
         self.bot = bot
@@ -101,7 +124,8 @@ class Stats(commands.Cog, name="stats"):
             color=0xBEBEFE,
         )
         for field_name, lines in fields:
-            embed.add_field(name=field_name, value="\n".join(lines), inline=False)
+            for sub_name, value in split_fields(field_name, lines):
+                embed.add_field(name=sub_name, value=value, inline=False)
         await context.send(embed=embed)
 
     @mystats.autocomplete("game")

@@ -1,11 +1,11 @@
 """Tests for the Catfishing cog: grid parsing, scoring and date anchoring."""
 
-from datetime import date
+from datetime import date, datetime, timezone
 from types import SimpleNamespace
 
 import pytest
 
-from cogs.catfishing import Catfishing, _fmt
+from cogs.catfishing import GROUP_COMPLETE_MESSAGE, Catfishing, _fmt
 
 POSTED = date(2026, 8, 22)
 
@@ -116,3 +116,71 @@ class TestFormatting:
 
     def test_half_point_kept(self):
         assert _fmt(3.5) == "3.5"
+
+
+class RecordingChannel:
+    def __init__(self):
+        self.id = 100
+        self.sent = []
+
+    async def send(self, content=None, **kwargs):
+        self.sent.append(content)
+
+
+def live_message(mid, content, channel, author_id=1):
+    return SimpleNamespace(
+        id=mid,
+        content=content,
+        author=SimpleNamespace(id=author_id, display_name=f"p{author_id}", bot=False),
+        channel=channel,
+        created_at=datetime(2026, 8, 5, tzinfo=timezone.utc),
+    )
+
+
+NINE_CORRECT = "#700 - 9/10\n🐈🐈🐈🐈🐈\n🐈🐈🐈🐈🐟"
+LAST_PIECE = "#700 - 1/10\n🐟🐟🐟🐟🐟\n🐟🐟🐟🐟🐈"
+ALL_TEN = "#701 - 10/10\n🐈🐈🐈🐈🐈\n🐈🐈🐈🐈🐈"
+
+
+class TestGroupCompleteCelebration:
+    """The live 10/10 celebration, through the real on_message listener."""
+
+    @pytest.fixture
+    def channel(self):
+        return RecordingChannel()
+
+    @pytest.fixture
+    async def cog(self, db):
+        catfishing = Catfishing(SimpleNamespace(database=db))
+        # Live capture only runs for channels a command has initialised.
+        await db.set_leaderboard_scan(
+            "catfishing", 100, None, "2026-08-01T00:00:00+00:00"
+        )
+        return catfishing
+
+    async def test_completing_message_triggers_one_celebration(self, cog, channel):
+        await cog.on_message(live_message(1, NINE_CORRECT, channel, author_id=1))
+        assert channel.sent == []  # 9/10 covered: not yet
+
+        await cog.on_message(live_message(2, LAST_PIECE, channel, author_id=2))
+        assert channel.sent == [GROUP_COMPLETE_MESSAGE]
+
+    async def test_no_second_celebration_once_complete(self, cog, channel):
+        await cog.on_message(live_message(1, NINE_CORRECT, channel, author_id=1))
+        await cog.on_message(live_message(2, LAST_PIECE, channel, author_id=2))
+        # A third result re-covering already-covered questions changes nothing.
+        await cog.on_message(live_message(3, LAST_PIECE, channel, author_id=3))
+        assert channel.sent == [GROUP_COMPLETE_MESSAGE]
+
+    async def test_solo_perfect_counts(self, cog, channel):
+        await cog.on_message(live_message(1, ALL_TEN, channel))
+        assert channel.sent == [GROUP_COMPLETE_MESSAGE]
+
+    async def test_history_scans_never_celebrate(self, cog, channel):
+        # _store is the path history scans take; old completions stay quiet.
+        await cog._store(live_message(1, ALL_TEN, channel))
+        assert channel.sent == []
+
+    async def test_non_results_do_nothing(self, cog, channel):
+        await cog.on_message(live_message(1, "gg everyone", channel))
+        assert channel.sent == []

@@ -72,7 +72,7 @@ class DatabaseManager:
         the half-open range ``[start_iso, end_iso)`` (ISO date strings).
         """
         rows = await self.connection.execute(
-            "SELECT author_id, author_name, played_on, payload "
+            "SELECT author_id, author_name, played_on, payload, message_id "
             "FROM leaderboard_results "
             "WHERE game=? AND channel_id=? AND played_on >= ? AND played_on < ? "
             "ORDER BY played_on ASC",
@@ -86,6 +86,7 @@ class DatabaseManager:
                 "author_name": row[1],
                 "played_on": date.fromisoformat(row[2]),
                 "payload": json.loads(row[3]),
+                "message_id": int(row[4]),
             }
             for row in result
         ]

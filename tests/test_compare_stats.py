@@ -199,10 +199,8 @@ class TestCatfishingCompare:
         cog.stats_map[700] = (titles, rates)
 
         lines = await cog.compare_stats(rows, P1)
-        hardest_at = lines.index(
-            "**Hardest answers nobody else got** (global solve rate)"
-        )
-        easiest_at = lines.index("**Easiest answers nobody else got**")
+        hardest_at = lines.index("### Hardest answers nobody else got")
+        easiest_at = lines.index("### Easiest answers nobody else got")
 
         hardest = lines[hardest_at + 1 : easiest_at]
         easiest = lines[easiest_at + 1 :]
@@ -222,7 +220,7 @@ class TestCatfishingCompare:
         lines = await cog.compare_stats(rows, P1)
         # P1's uniques on puzzle 700 are questions 0 and 2 — both fit in the
         # hardest list, so there is nothing left for an easiest list.
-        assert "**Hardest answers nobody else got** (global solve rate)" in lines
+        assert "### Hardest answers nobody else got" in lines
         assert lines[-2] == "• Cat C — 8.0% (#700)"
         assert lines[-1] == "• Cat A — 50.0% (#700)"
         assert not any("Easiest" in line for line in lines)
