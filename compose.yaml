@@ -1,7 +1,10 @@
 services:
   discord-bot:
-    build: .
-    image: python-discord-bot-template
+    build:
+      context: .
+      dockerfile: Containerfile
+    image: kennel-leaderbot
+    restart: unless-stopped
     env_file:
       - .env
     volumes:

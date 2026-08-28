@@ -10,7 +10,7 @@ Adapted from [Krypton's Python-Discord-Bot-Template](https://github.com/kkrypt0n
 
 ### Requirements
 
-- Python 3.12 (or Docker)
+- Python 3.12 (or Podman)
 - Dependencies from `requirements.txt`: `discord.py==2.7.1`, `aiosqlite`, `aiohttp`, `pillow`, `python-dotenv`
 
 ### Discord Developer Portal
@@ -42,11 +42,13 @@ pip install -r requirements.txt
 python bot.py
 ```
 
-Or with Docker (persists the database and logs via volumes):
+Or in a container with Podman (persists the database and logs via volumes):
 
 ```sh
-docker compose up --build
+podman compose up --build
 ```
+
+(`podman compose` needs a compose provider — `pip install podman-compose` if you don't have one. The `Containerfile`/`compose.yaml` are standard format, so Docker works too if that's what's installed.)
 
 ### First run: sync slash commands
 
@@ -190,4 +192,4 @@ Storage is a single SQLite file, `database/database.db`, accessed through `aiosq
 
 Everything in `leaderboard_results` and `leaderboard_scan` is a **cache** of what's in the Discord channels: `/rebuild` can wipe it at any time, and the next leaderboard command rebuilds it from message history.
 
-The rest is **not** rebuildable — intro channel settings, taught aliases, inviter overrides, and autopost opt-ins are hand-curated state that only exists in this file. To protect it, the bot snapshots the database daily (04:00 UTC, with a catch-up on startup if today's is missing) into `database/backups/`, keeping the last 7 days. Snapshots use SQLite's online backup API, so they're safe to take while the bot is writing. The backups live inside the same `./database` Docker volume as the database, so they survive container rebuilds; to restore one, stop the bot and copy it over `database/database.db`.
+The rest is **not** rebuildable — intro channel settings, taught aliases, inviter overrides, and autopost opt-ins are hand-curated state that only exists in this file. To protect it, the bot snapshots the database daily (04:00 UTC, with a catch-up on startup if today's is missing) into `database/backups/`, keeping the last 7 days. Snapshots use SQLite's online backup API, so they're safe to take while the bot is writing. The backups live inside the same `./database` volume mount as the database, so they survive container rebuilds; to restore one, stop the bot and copy it over `database/database.db`.

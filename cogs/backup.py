@@ -5,7 +5,7 @@ The leaderboard cache is rebuildable from Discord history, but the rest of
 database.db is not: intro channels, invite aliases and overrides, and autopost
 opt-ins are hand-curated state that would be gone for good with the file. A
 daily task snapshots the database into ``database/backups/`` (inside the same
-Docker volume as the database itself) keeping the last ``KEEP`` days, a
+container volume mount as the database itself) keeping the last ``KEEP`` days, a
 catch-up snapshot is taken on startup if today's is missing, and the
 owner-only /backup command takes one on demand.
 
