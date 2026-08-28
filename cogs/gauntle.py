@@ -207,6 +207,54 @@ class Gauntle(LeaderboardCog, name="gauntle"):
 
         return played_on, {"total": total, "categories": categories}
 
+    async def on_result_captured(self, message, played_on, payload) -> None:
+        """
+        Celebrate new personal bests the moment they're posted.
+
+        Compares a freshly posted run against the poster's *own* cached history
+        in this channel — the overall time and each category's effective time —
+        and replies with a small note for a new overall best and/or new
+        category bests. A first-ever run (or first time playing a category)
+        just sets the baseline silently. Only fires for live messages, so
+        history scans can't replay old bests.
+        """
+        rows = [
+            row
+            for row in await self._load_all(message.channel.id)
+            if row["author_id"] == message.author.id
+            and row["message_id"] != message.id
+        ]
+        if not rows:
+            return  # first run: nothing to compare against
+
+        best_total = min(row["payload"]["total"] for row in rows)
+        best_categories: dict[str, float] = {}
+        for row in rows:
+            for name, info in row["payload"].get("categories", {}).items():
+                effective = _effective(info)
+                if name not in best_categories or effective < best_categories[name]:
+                    best_categories[name] = effective
+
+        parts = []
+        if payload["total"] < best_total:
+            parts.append(f"🏆 New personal best: {_fmt_time(payload['total'])}!")
+        improved = [
+            (name, _effective(info))
+            for name, info in payload.get("categories", {}).items()
+            if name in best_categories and _effective(info) < best_categories[name]
+        ]
+        if improved:
+            listed = ", ".join(
+                f"{name} ({_fmt_time(effective)})" for name, effective in improved
+            )
+            parts.append(f"✨ New category best: {listed}")
+        if not parts:
+            return
+        try:
+            await message.reply("\n".join(parts), mention_author=False)
+        except discord.HTTPException:
+            pass  # can't reply here; the leaderboard still counts it
+
     @commands.hybrid_command(
         name="gauntle",
         description="Show the fastest Gauntle runs and best category times in this channel.",

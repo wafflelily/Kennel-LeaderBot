@@ -1,6 +1,6 @@
 """Tests for the Gauntle cog: parsing, year inference and time formatting."""
 
-from datetime import date
+from datetime import date, datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -154,3 +154,98 @@ class TestFormatting:
 
     def test_fmt_solve_fractional_adjustment(self):
         assert _fmt_solve(70.0, 1.5) == "1:10.00 (+1.5s)"
+
+
+def run_text(day, minutes, categories=""):
+    return (
+        f"I ran the August {day}th Gauntlet in {minutes} minutes and 0 seconds!\n"
+        + categories
+    )
+
+
+def live_message(mid, content, replies, author_id=1):
+    async def reply(text, **kwargs):
+        replies.append(text)
+
+    return SimpleNamespace(
+        id=mid,
+        content=content,
+        author=SimpleNamespace(id=author_id, display_name=f"p{author_id}", bot=False),
+        channel=SimpleNamespace(id=100),
+        created_at=datetime(2026, 8, 5, tzinfo=timezone.utc),
+        reply=reply,
+    )
+
+
+class TestPersonalBestCelebration:
+    """The live PB reply, through the real on_message listener."""
+
+    @pytest.fixture
+    def replies(self):
+        return []
+
+    @pytest.fixture
+    async def cog(self, db):
+        gauntle = Gauntle(SimpleNamespace(database=db))
+        # Live capture only runs for channels a command has initialised.
+        await db.set_leaderboard_scan(
+            "gauntle", 100, None, "2026-08-01T00:00:00+00:00"
+        )
+        return gauntle
+
+    async def test_first_run_sets_baseline_silently(self, cog, replies):
+        await cog.on_message(live_message(1, run_text(5, 15), replies))
+        assert replies == []
+
+    async def test_overall_pb_gets_a_reply(self, cog, replies):
+        await cog.on_message(live_message(1, run_text(5, 15), replies))
+        await cog.on_message(live_message(2, run_text(6, 14), replies))
+        assert replies == ["🏆 New personal best: 14:00.00!"]
+
+    async def test_slower_run_stays_quiet(self, cog, replies):
+        await cog.on_message(live_message(1, run_text(5, 14), replies))
+        await cog.on_message(live_message(2, run_text(6, 15), replies))
+        assert replies == []
+
+    async def test_category_best_without_overall_best(self, cog, replies):
+        await cog.on_message(
+            live_message(1, run_text(5, 14, "Sudoku: 1:00.00 (−10s)"), replies)
+        )
+        # Slower run overall, but Sudoku improves from 50s to 40s effective.
+        await cog.on_message(
+            live_message(2, run_text(6, 16, "Sudoku: 0:50.00 (−10s)"), replies)
+        )
+        assert replies == ["✨ New category best: Sudoku (40.00s)"]
+
+    async def test_first_time_category_is_silent(self, cog, replies):
+        await cog.on_message(
+            live_message(1, run_text(5, 14, "Sudoku: 1:00.00"), replies)
+        )
+        # Wordy has no history for this player; slower run overall too.
+        await cog.on_message(
+            live_message(2, run_text(6, 16, "Wordy: 2:00.00"), replies)
+        )
+        assert replies == []
+
+    async def test_overall_and_category_bests_combine(self, cog, replies):
+        await cog.on_message(
+            live_message(1, run_text(5, 15, "Sudoku: 1:00.00"), replies)
+        )
+        await cog.on_message(
+            live_message(2, run_text(6, 14, "Sudoku: 0:50.00"), replies)
+        )
+        assert replies == [
+            "🏆 New personal best: 14:00.00!\n✨ New category best: Sudoku (50.00s)"
+        ]
+
+    async def test_bests_are_per_player(self, cog, replies):
+        await cog.on_message(live_message(1, run_text(5, 14), replies, author_id=1))
+        # Player 2's first run is slower than player 1's — still their baseline.
+        await cog.on_message(live_message(2, run_text(6, 20), replies, author_id=2))
+        assert replies == []
+
+    async def test_history_scans_never_celebrate(self, cog, replies):
+        await cog._store(live_message(1, run_text(5, 15), replies))
+        # _store is the scan path; a faster old run must stay quiet.
+        await cog._store(live_message(2, run_text(6, 10), replies))
+        assert replies == []
