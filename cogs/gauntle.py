@@ -247,7 +247,7 @@ class Gauntle(LeaderboardCog, name="gauntle"):
             listed = ", ".join(
                 f"{name} ({_fmt_time(effective)})" for name, effective in improved
             )
-            parts.append(f"✨ New category best: {listed}")
+            parts.append(f"✨ New personal category best: {listed}")
         if not parts:
             return
         try:
