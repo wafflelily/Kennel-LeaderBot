@@ -215,7 +215,7 @@ class TestPersonalBestCelebration:
         await cog.on_message(
             live_message(2, run_text(6, 16, "Sudoku: 0:50.00 (−10s)"), replies)
         )
-        assert replies == ["✨ New category best: Sudoku (40.00s)"]
+        assert replies == ["✨ New personal category best: Sudoku (40.00s)"]
 
     async def test_first_time_category_is_silent(self, cog, replies):
         await cog.on_message(
@@ -235,7 +235,7 @@ class TestPersonalBestCelebration:
             live_message(2, run_text(6, 14, "Sudoku: 0:50.00"), replies)
         )
         assert replies == [
-            "🏆 New personal best: 14:00.00!\n✨ New category best: Sudoku (50.00s)"
+            "🏆 New personal best: 14:00.00!\n✨ New personal category best: Sudoku (50.00s)"
         ]
 
     async def test_bests_are_per_player(self, cog, replies):
