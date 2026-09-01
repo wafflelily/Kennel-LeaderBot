@@ -43,26 +43,31 @@ class TestGauntleCompare:
         lines = await cog.compare_stats(rows, P1)
         assert lines[0] == "Days run: **3**"
         assert "**1** of 2 contested days" in lines[1]
-        # P1 average 100s = 1:40.00, channel average 105s: 5s faster.
-        assert "1:40.00" in lines[2]
-        assert "5.00s faster" in lines[2]
-        # P1 holds Sudoku (50 effective vs 55) and Wordy (solo), not Mines.
-        assert "Sudoku, Wordy" in lines[3]
-        assert "(2 of 3)" in lines[3]
+        # P1's fastest run is 90s, on August 3rd.
+        assert lines[2] == "⚡ Personal best run: **1:30.00** (on Aug 03)"
+        # Per-category bests, alphabetical; crowns where P1 holds the channel
+        # record: Sudoku (50 vs 55) and Wordy (solo), but not Mines (90 vs 80).
+        assert lines[3] == "### Personal category bests (👑 = channel record)"
+        assert lines[4:] == [
+            "• Mines: 1:30.00",
+            "• Sudoku: 50.00s 👑",
+            "• Wordy: 40.00s 👑",
+        ]
 
     async def test_old_format_category_row_can_hold_a_best(self, cog, rows):
         # P2's Mines (old-format float, 80s) beats P1's 90s.
         lines = await cog.compare_stats(rows, P2)
-        assert "**Mines**" in lines[3]
-        assert "(1 of 3)" in lines[3]
+        assert "• Mines: 1:20.00 👑" in lines
+        assert "• Sudoku: 55.00s" in lines  # no crown: P1's 50s is faster
 
-    async def test_no_bests_held(self, cog):
+    async def test_no_crowns_when_no_records_held(self, cog):
         rows = [
             row(P1, date(2026, 8, 1), {"total": 100.0, "categories": {"Sudoku": {"raw": 50.0, "adj": 0.0}}}),
             row(P2, date(2026, 8, 1), {"total": 120.0, "categories": {"Sudoku": {"raw": 55.0, "adj": 0.0}}}),
         ]
         lines = await cog.compare_stats(rows, P2)
-        assert "none right now" in lines[3]
+        assert "• Sudoku: 55.00s" in lines
+        assert all("👑" not in line for line in lines if line.startswith("•"))
 
     async def test_same_day_reposts_keep_fastest_run(self, cog):
         rows = [
@@ -72,6 +77,8 @@ class TestGauntleCompare:
         lines = await cog.compare_stats(rows, P1)
         assert lines[0] == "Days run: **1**"
         assert "1:40.00" in lines[2]
+        # No categories at all: the category-bests section is omitted.
+        assert len(lines) == 3
 
     async def test_unknown_player_returns_none(self, cog, rows):
         assert await cog.compare_stats(rows, 999) is None

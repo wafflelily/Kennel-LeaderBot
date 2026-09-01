@@ -468,17 +468,9 @@ class Gauntle(LeaderboardCog, name="gauntle"):
         contested = [day for day in mine if len(by_day[day]) > 1]
         wins = sum(1 for day in contested if mine[day] == min(by_day[day].values()))
 
-        my_avg = sum(mine.values()) / len(mine)
-        channel_avg = sum(best.values()) / len(best)
-        diff = my_avg - channel_avg
-        if abs(diff) < 0.005:
-            comparison = "level with"
-        else:
-            comparison = (
-                f"{_fmt_time(abs(diff))} {'faster' if diff < 0 else 'slower'} than"
-            )
+        best_day = min(mine, key=mine.get)
 
-        # Category records: who holds the channel's best effective time.
+        # Per-category personal bests, and the channel's best for the crown.
         channel_best: dict[str, float] = {}
         my_best: dict[str, float] = {}
         for row in rows:
@@ -490,24 +482,19 @@ class Gauntle(LeaderboardCog, name="gauntle"):
                     name not in my_best or effective < my_best[name]
                 ):
                     my_best[name] = effective
-        held = sorted(
-            name for name, effective in my_best.items()
-            if effective == channel_best[name]
-        )
 
         lines = [
             f"Days run: **{len(mine)}**",
             f"🏆 Fastest of the day: **{wins}** of {len(contested)} contested days",
-            f"⚡ Average run: **{_fmt_time(my_avg)}** — {comparison} the "
-            f"channel's {_fmt_time(channel_avg)}",
+            f"⚡ Personal best run: **{_fmt_time(mine[best_day])}** "
+            f"(on {best_day:%b %d})",
         ]
-        if held:
-            lines.append(
-                f"👑 Category bests held: **{', '.join(held)}** "
-                f"({len(held)} of {len(channel_best)})"
-            )
-        else:
-            lines.append("👑 Category bests held: none right now")
+        if my_best:
+            # "### " lines become their own embed field in /mystats.
+            lines.append("### Personal category bests (👑 = channel record)")
+            for name in sorted(my_best):
+                crown = " 👑" if my_best[name] == channel_best[name] else ""
+                lines.append(f"• {name}: {_fmt_time(my_best[name])}{crown}")
         return lines
 
 

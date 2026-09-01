@@ -34,7 +34,7 @@ rather than re-scanning the whole channel each time.
 
 import asyncio
 import re
-from collections import Counter, defaultdict
+from collections import defaultdict
 from datetime import date
 
 import aiohttp
@@ -208,38 +208,6 @@ class Catfishing(LeaderboardCog, name="catfishing"):
             await message.channel.send(GROUP_COMPLETE_MESSAGE)
         except discord.HTTPException:
             pass  # can't send here; the leaderboard still counts it
-
-    @staticmethod
-    def _date_anchor(rows) -> int | None:
-        """
-        Work out the offset that maps a puzzle number to its real date.
-
-        Catfishing results carry only a puzzle number, not a date, so the post
-        date is an unreliable guide near month boundaries (a puzzle can be posted
-        just after midnight, or a day or two late). But the puzzles are a daily
-        sequence, so ``real_date = puzzle_number + anchor`` for a fixed anchor.
-
-        We recover that anchor from the data: for a same-day post,
-        ``post_ordinal - puzzle_number`` equals the anchor, so the most common
-        value of that difference across all cached results is the anchor. Late
-        or catch-up posts are outvoted. Returns None if there's nothing to go on.
-        """
-        offsets = Counter(
-            row["played_on"].toordinal() - row["payload"]["puzzle"] for row in rows
-        )
-        if not offsets:
-            return None
-        return offsets.most_common(1)[0][0]
-
-    @classmethod
-    def _puzzle_date(cls, puzzle: int, anchor: int | None, fallback: date) -> date:
-        """Map a puzzle number to its real date, falling back to the post date."""
-        if anchor is None:
-            return fallback
-        try:
-            return date.fromordinal(puzzle + anchor)
-        except (ValueError, OverflowError):
-            return fallback
 
     @commands.hybrid_command(
         name="catfishing",

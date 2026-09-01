@@ -146,6 +146,20 @@ class TestClearGame:
         assert await db.get_leaderboard_scan("foodguessr", 100) == (3, "2026-08-01")
 
 
+class TestPuzzleInfo:
+    async def test_round_trip_and_overwrite(self, db):
+        await db.set_puzzle_info("krillion", 48, {"date": "2026-09-01", "prompts": ["a"]})
+        assert await db.get_puzzle_info("krillion") == {
+            48: {"date": "2026-09-01", "prompts": ["a"]}
+        }
+        await db.set_puzzle_info("krillion", 48, {"prompts": ["b"]})
+        assert (await db.get_puzzle_info("krillion"))[48] == {"prompts": ["b"]}
+
+    async def test_namespaced_per_game(self, db):
+        await db.set_puzzle_info("krillion", 48, {"prompts": ["a"]})
+        assert await db.get_puzzle_info("catfishing") == {}
+
+
 class TestScanState:
     async def test_unscanned_channel_returns_none_pair(self, db):
         assert await db.get_leaderboard_scan("gauntle", 100) == (None, None)

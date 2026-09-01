@@ -6,6 +6,8 @@ Description:
 Version: 6.5.0
 """
 
+from typing import Union
+
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -241,6 +243,140 @@ class Owner(commands.Cog, name="owner"):
 
     @rebuild.autocomplete("game")
     async def rebuild_game_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        games = {
+            cog.GAME
+            for cog in self.bot.cogs.values()
+            if isinstance(cog, LeaderboardCog)
+        }
+        return game_choices(games, current)
+
+    @staticmethod
+    async def _import_history(
+        cog: LeaderboardCog, source, target_channel_id: int
+    ) -> int:
+        """
+        Scan ``source``'s full history once and store every result ``cog``
+        recognises under ``target_channel_id`` instead of the source channel.
+        Returns how many results were imported. Results are keyed by message
+        id, so re-importing updates rather than duplicates.
+        """
+        imported = 0
+        async for message in source.history(limit=None, oldest_first=True):
+            if message.author.bot or not message.content:
+                continue
+            parsed = cog.parse(message.content, message.created_at.date())
+            if parsed is None:
+                continue
+            played_on, payload = parsed
+            await cog.bot.database.upsert_leaderboard_result(
+                cog.GAME,
+                target_channel_id,
+                message.id,
+                message.author.id,
+                message.author.display_name,
+                played_on,
+                payload,
+            )
+            imported += 1
+        return imported
+
+    @commands.hybrid_command(
+        name="import",
+        description="One-off scan of another channel, merging a game's results into this channel.",
+    )
+    @app_commands.describe(
+        game="Which leaderboard to import, e.g. `gauntle`.",
+        channel="The channel whose history should be scanned.",
+    )
+    @commands.is_owner()
+    @commands.guild_only()
+    async def import_results(
+        self,
+        context: Context,
+        game: str,
+        channel: Union[discord.TextChannel, discord.Thread],
+    ) -> None:
+        """
+        Import another channel's results for a game into this channel's data.
+
+        Useful when results used to be posted somewhere else: the source
+        channel's history is scanned once and every result found is stored
+        against *this* channel, merging into its leaderboards and stats.
+        Re-running is safe (results are keyed by message, nothing duplicates),
+        but it's a one-off — new results in the source channel afterwards are
+        not tracked, and `/rebuild` wipes imported rows along with the rest.
+
+        :param context: The hybrid command context.
+        :param game: The leaderboard game to import results for.
+        :param channel: The channel to scan.
+        """
+        games = {
+            cog.GAME: cog
+            for cog in self.bot.cogs.values()
+            if isinstance(cog, LeaderboardCog)
+        }
+        game = game.strip().lower()
+        if game not in games:
+            valid = ", ".join(f"`{g}`" for g in sorted(games))
+            await context.send(
+                embed=discord.Embed(
+                    title="Error!",
+                    description=f"Unknown leaderboard `{game}`.\nValid options: {valid}.",
+                    color=0xE02B2B,
+                )
+            )
+            return
+        if channel.id == context.channel.id:
+            await context.send(
+                embed=discord.Embed(
+                    title="Error!",
+                    description=(
+                        "That's this channel — pick the *other* channel the "
+                        "results should be imported from."
+                    ),
+                    color=0xE02B2B,
+                )
+            )
+            return
+
+        # Scanning a whole channel's history can take a while.
+        await context.defer()
+
+        try:
+            imported = await self._import_history(
+                games[game], channel, context.channel.id
+            )
+        except discord.Forbidden:
+            await context.send(
+                embed=discord.Embed(
+                    title="Error!",
+                    description=(
+                        f"I don't have permission to read the history of "
+                        f"{channel.mention}.\n\nPlease give me the **View Channel** "
+                        "and **Read Message History** permissions there, then try again."
+                    ),
+                    color=0xE02B2B,
+                )
+            )
+            return
+
+        await context.send(
+            embed=discord.Embed(
+                title="📥 Import complete",
+                description=(
+                    f"Imported **{imported}** `{game}` result"
+                    f"{'s' if imported != 1 else ''} from {channel.mention} into "
+                    "this channel's data.\n\nThis was a one-off: new results "
+                    f"posted in {channel.mention} won't be tracked here."
+                ),
+                color=0xBEBEFE,
+            )
+        )
+
+    @import_results.autocomplete("game")
+    async def import_game_autocomplete(
         self, interaction: discord.Interaction, current: str
     ) -> list[app_commands.Choice[str]]:
         games = {

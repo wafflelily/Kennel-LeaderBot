@@ -42,6 +42,16 @@ CREATE TABLE IF NOT EXISTS `invite_overrides` (
   PRIMARY KEY (`server_id`, `member_id`)
 );
 
+-- Extra per-puzzle info fetched from a game's website — e.g. Krillion's daily
+-- prompts, which the site only serves on the day itself, so the bot archives
+-- them as they appear. `payload` is a game-specific JSON blob.
+CREATE TABLE IF NOT EXISTS `puzzle_info` (
+  `game` TEXT NOT NULL,
+  `puzzle` INTEGER NOT NULL,
+  `payload` TEXT NOT NULL,
+  PRIMARY KEY (`game`, `puzzle`)
+);
+
 -- Channels that get an automatic leaderboard post for a game on the 1st of
 -- each month (opted in via /autopost).
 CREATE TABLE IF NOT EXISTS `leaderboard_autopost` (

@@ -109,6 +109,24 @@ class DatabaseManager:
         await self.connection.commit()
         return removed
 
+    async def set_puzzle_info(self, game: str, puzzle: int, payload: dict) -> None:
+        """Store (or overwrite) fetched per-puzzle info for a game."""
+        await self.connection.execute(
+            "INSERT INTO puzzle_info (game, puzzle, payload) VALUES (?, ?, ?) "
+            "ON CONFLICT(game, puzzle) DO UPDATE SET payload=excluded.payload",
+            (game, puzzle, json.dumps(payload)),
+        )
+        await self.connection.commit()
+
+    async def get_puzzle_info(self, game: str) -> dict[int, dict]:
+        """Return all stored per-puzzle info for a game: puzzle -> payload."""
+        rows = await self.connection.execute(
+            "SELECT puzzle, payload FROM puzzle_info WHERE game=?", (game,)
+        )
+        async with rows as cursor:
+            result = await cursor.fetchall()
+        return {int(row[0]): json.loads(row[1]) for row in result}
+
     async def set_autopost(self, game: str, channel_id: int, enabled: bool) -> None:
         """Opt a channel in or out of the monthly automatic leaderboard post."""
         if enabled:
