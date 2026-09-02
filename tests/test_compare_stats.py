@@ -52,6 +52,8 @@ class TestGauntleCompare:
             "• Mines: 1:30.00",
             "• Sudoku: 50.00s 👑",
             "• Wordy: 40.00s 👑",
+            # Sum of bests: 90 + 50 + 40 = 180s.
+            "**Sum of bests: 3:00.00**",
         ]
 
     async def test_old_format_category_row_can_hold_a_best(self, cog, rows):

@@ -495,6 +495,11 @@ class Gauntle(LeaderboardCog, name="gauntle"):
             for name in sorted(my_best):
                 crown = " 👑" if my_best[name] == channel_best[name] else ""
                 lines.append(f"• {name}: {_fmt_time(my_best[name])}{crown}")
+            # A "dream run": the sum of every category's personal best, as if
+            # all their best category times had landed in one run.
+            lines.append(
+                f"**Sum of bests: {_fmt_time(sum(my_best.values()))}**"
+            )
         return lines
 
 

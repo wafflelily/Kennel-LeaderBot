@@ -47,7 +47,7 @@ class TestParse:
         assert payload["answers"] == [30, 10, 60, 0, 30, 30, 60]
 
     def test_lanternfish_and_shrimp_values(self, cog):
-        message = "Krillion #10 🦐\n385\n\n🦐🏮🦑🐟🫧⬛🦐"
+        message = "Krillion #10 🦐\n385\n\n🌟🏮🦑🐟🫧⬛🌟"
         _, payload = cog.parse(message, POSTED)
         assert payload["answers"] == [100, 85, 60, 30, 10, 0, 100]
         assert payload["score"] == 385
@@ -140,7 +140,7 @@ class TestCompareStats:
         counts_at = lines.index("### Answer counts")
         # P1's grids: [100,85,60,30,10,0,100] and [60,60,10,60,30,10,30].
         assert lines[counts_at + 1 :] == [
-            "🦐 100 pts — **2**",
+            "🌟 100 pts — **2**",
             "🏮 85 pts — **1**",
             "🦑 60 pts — **4**",
             "🐟 30 pts — **3**",
@@ -161,11 +161,11 @@ class TestCompareStats:
             46,
             {
                 "prompts": [f"Q{i}" for i in range(1, 8)],
-                "shrimp": ["A1", "A2", "A3", "A4", "A5", "A6", "A7"],
+                "shrimp": [[f"A{i}"] for i in range(1, 8)],
             },
         )
         lines = await cog.compare_stats(rows, P1)
-        catches_at = lines.index("### Shrimp catches 🦐")
+        catches_at = lines.index("### Shrimp catches 🌟")
         # P1's day-46 grid has shrimps in slots 0 and 6 → answers A1 and A7;
         # day 47 isn't archived, so its shrimp-free grid adds nothing.
         assert lines[catches_at + 1 :] == [
@@ -173,18 +173,44 @@ class TestCompareStats:
             "• Q7 → **A7** (#46)",
         ]
 
+    async def test_shrimp_catches_list_multiple_star_answers(self, cog, db, rows):
+        shrimp = [[f"A{i}"] for i in range(1, 8)]
+        shrimp[0] = ["A1a", "A1b"]  # slot 0 (Q1) has two star answers
+        await db.set_puzzle_info(
+            "krillion", 46, {"prompts": [f"Q{i}" for i in range(1, 8)], "shrimp": shrimp}
+        )
+        lines = await cog.compare_stats(rows, P1)
+        catches_at = lines.index("### Shrimp catches 🌟")
+        assert lines[catches_at + 1 :] == [
+            "• Q1 → **A1a / A1b** (#46)",
+            "• Q7 → **A7** (#46)",
+        ]
+
+    async def test_shrimp_catches_tolerate_legacy_single_string_form(
+        self, cog, db, rows
+    ):
+        # Days archived by the earlier single-answer format still resolve.
+        await db.set_puzzle_info(
+            "krillion",
+            46,
+            {"prompts": [f"Q{i}" for i in range(1, 8)], "shrimp": [f"A{i}" for i in range(1, 8)]},
+        )
+        lines = await cog.compare_stats(rows, P1)
+        catches_at = lines.index("### Shrimp catches 🌟")
+        assert lines[catches_at + 1 :] == ["• Q1 → **A1** (#46)", "• Q7 → **A7** (#46)"]
+
     async def test_shrimp_catches_without_answer_data_omit_the_arrow(self, cog, db, rows):
         # Prompts archived but no shrimp answers (older-format archive).
         await db.set_puzzle_info(
             "krillion", 46, {"prompts": [f"Q{i}" for i in range(1, 8)]}
         )
         lines = await cog.compare_stats(rows, P1)
-        catches_at = lines.index("### Shrimp catches 🦐")
+        catches_at = lines.index("### Shrimp catches 🌟")
         assert lines[catches_at + 1 :] == ["• Q1 (#46)", "• Q7 (#46)"]
 
     async def test_no_shrimp_section_without_archived_prompts(self, cog, rows):
         lines = await cog.compare_stats(rows, P1)
-        assert "### Shrimp catches 🦐" not in lines
+        assert "### Shrimp catches 🌟" not in lines
 
 
 class TestPromptArchive:
@@ -221,7 +247,8 @@ class TestPromptArchive:
         stored = await db.get_puzzle_info("krillion")
         assert stored[48]["date"] == "2026-09-01"
         assert stored[48]["prompts"] == [f"Prompt {i}" for i in range(1, 8)]
-        assert stored[48]["shrimp"] == [f"Shrimp{i}" for i in range(1, 8)]
+        # Each prompt's star answers are stored as a list (usually one).
+        assert stored[48]["shrimp"] == [[f"Shrimp{i}"] for i in range(1, 8)]
 
     async def test_reveal_failure_stores_prompts_without_shrimp(self, cog, db):
         assert await cog._store_today(self._today(), None) is True
@@ -229,18 +256,27 @@ class TestPromptArchive:
         assert stored[48]["prompts"] == [f"Prompt {i}" for i in range(1, 8)]
         assert "shrimp" not in stored[48]
 
-    async def test_prompt_missing_shrimp_answer_stores_none(self, cog, db):
+    async def test_prompt_missing_shrimp_answer_stores_empty_list(self, cog, db):
         reveal = self._reveal()
         reveal["prompts"][2]["answers"] = [{"answer": "Squid3", "score": 60}]
         await cog._store_today(self._today(), reveal)
         stored = await db.get_puzzle_info("krillion")
-        assert stored[48]["shrimp"][2] is None
-        assert stored[48]["shrimp"][0] == "Shrimp1"
+        assert stored[48]["shrimp"][2] == []
+        assert stored[48]["shrimp"][0] == ["Shrimp1"]
 
     def test_shrimp_from_reveal_extracts_one_per_prompt(self, cog):
         assert cog._shrimp_from_reveal(self._reveal()) == [
-            f"Shrimp{i}" for i in range(1, 8)
+            [f"Shrimp{i}"] for i in range(1, 8)
         ]
+
+    def test_shrimp_from_reveal_keeps_multiple_star_answers(self, cog):
+        reveal = self._reveal()
+        reveal["prompts"][0]["answers"] = [
+            {"answer": "Star A", "score": 100},
+            {"answer": "Star B", "score": 100},
+            {"answer": "Squid", "score": 60},
+        ]
+        assert cog._shrimp_from_reveal(reveal)[0] == ["Star A", "Star B"]
 
     @pytest.mark.parametrize(
         "reveal",
@@ -293,8 +329,8 @@ class TestBuilder:
         embed = await cog.build_leaderboard(channel, (2026, 8), "August 2026")
         assert embed is not None
         first, second = embed.description.splitlines()
-        assert "🥇 **alice** — 385 pts (1 day, avg 385) · 🦐2 🏮1 🦑1" == first
-        assert "🥈 **bob** — 220 pts (1 day, avg 220) · 🦐0 🏮0 🦑2" == second
+        assert "🥇 **alice** — 385 pts (1 day, avg 385) · 🌟2 🏮1 🦑1" == first
+        assert "🥈 **bob** — 220 pts (1 day, avg 220) · 🌟0 🏮0 🦑2" == second
         assert "August 2026" in embed.footer.text
 
     async def test_question_averages_with_archived_prompts(self, db, channel):
@@ -312,7 +348,7 @@ class TestBuilder:
             47,
             {
                 "prompts": [f"Q{i}" for i in range(1, 8)],
-                "shrimp": [f"A{i}" for i in range(1, 8)],
+                "shrimp": [[f"A{i}"] for i in range(1, 8)],
             },
         )
         embed = await cog.build_leaderboard(channel, (2026, 8), "August 2026")
@@ -323,8 +359,8 @@ class TestBuilder:
         # shrimp answer — questions nobody here shrimped stay unnamed.
         best = fields["💪 Best questions (group average)"].splitlines()
         assert best == [
-            "• Q7 — avg 80 pts (#47) — 🦐 A7",
-            "• Q1 — avg 65 pts (#47) — 🦐 A1",
+            "• Q7 — avg 80 pts (#47) — 🌟 A7",
+            "• Q1 — avg 65 pts (#47) — 🌟 A1",
             "• Q3 — avg 60 pts (#47)",
         ]
         worst = fields["😰 Worst questions (group average)"].splitlines()
@@ -333,6 +369,26 @@ class TestBuilder:
             "• Q6 — avg 15 pts (#47)",
             "• Q5 — avg 20 pts (#47)",
         ]
+
+    async def test_question_field_lists_multiple_star_answers(self, db, channel):
+        cog = Krillion(SimpleNamespace(database=db))
+        # Both players shrimp slot 6 (Q7); it has two star answers.
+        await db.upsert_leaderboard_result(
+            "krillion", 100, 1, 42, "alice", date(2026, 8, 30),
+            {"puzzle": 47, "score": 400, "answers": [30, 30, 30, 30, 30, 30, 100]},
+        )
+        await db.upsert_leaderboard_result(
+            "krillion", 100, 2, 43, "bob", date(2026, 8, 30),
+            {"puzzle": 47, "score": 400, "answers": [30, 30, 30, 30, 30, 30, 100]},
+        )
+        shrimp = [[f"A{i}"] for i in range(1, 8)]
+        shrimp[6] = ["A7a", "A7b"]
+        await db.set_puzzle_info(
+            "krillion", 47, {"prompts": [f"Q{i}" for i in range(1, 8)], "shrimp": shrimp}
+        )
+        embed = await cog.build_leaderboard(channel, (2026, 8), "August 2026")
+        text = "\n".join(f.value for f in embed.fields)
+        assert "• Q7 — avg 100 pts (#47) — 🌟 A7a / A7b" in text
 
     async def test_shrimp_answer_hidden_when_nobody_here_got_it(self, db, channel):
         cog = Krillion(SimpleNamespace(database=db))
@@ -348,14 +404,14 @@ class TestBuilder:
         await db.set_puzzle_info(
             "krillion",
             47,
-            {"prompts": [f"Q{i}" for i in range(1, 8)], "shrimp": [f"A{i}" for i in range(1, 8)]},
+            {"prompts": [f"Q{i}" for i in range(1, 8)], "shrimp": [[f"A{i}"] for i in range(1, 8)]},
         )
         embed = await cog.build_leaderboard(channel, (2026, 8), "August 2026")
         text = "\n".join(f.value for f in embed.fields)
         # Q7 was shrimped → its answer shows; Q1 (highest avg after Q7) wasn't.
-        assert "• Q7 — avg 80 pts (#47) — 🦐 A7" in text
+        assert "• Q7 — avg 80 pts (#47) — 🌟 A7" in text
         assert "• Q1 — avg 85 pts (#47)" in text
-        assert "🦐 A1" not in text
+        assert "🌟 A1" not in text
 
     async def test_no_question_fields_without_two_grids(self, db, channel):
         cog = Krillion(SimpleNamespace(database=db))
@@ -403,4 +459,4 @@ class TestBuilder:
         embed = await cog.build_leaderboard(channel, (2026, 8), "August 2026")
         assert "260 pts (1 day" in embed.description
         # The counts come from the kept (best) share's grid: three squids.
-        assert "🦐0 🏮0 🦑3" in embed.description
+        assert "🌟0 🏮0 🦑3" in embed.description

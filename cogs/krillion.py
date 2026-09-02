@@ -24,7 +24,7 @@ match the daily patterns.
 
 Each grid symbol is one prompt's answer quality:
 ⬛ no submission (0) · 🫧 bubbles (10) · 🐟 fish (30) · 🦑 squid (60) ·
-🏮 lanternfish (85) · 🦐 shrimp (100), so a perfect day is 700. When a grid is
+🏮 lanternfish (85) · 🌟 shrimp (100), so a perfect day is 700. When a grid is
 present it's authoritative (the stated score is ignored); the bare form is
 validated strictly (0-700, multiple of 5) so ordinary chat can't match.
 
@@ -48,12 +48,13 @@ from discord.ext.commands import Context
 from leaderboard.base import LeaderboardCog, month_choices
 
 # Answer symbol -> points. ⬛ means "no submission".
-VALUES = {"⬛": 0, "🫧": 10, "🐟": 30, "🦑": 60, "🏮": 85, "🦐": 100}
+VALUES = {"⬛": 0, "🫧": 10, "🐟": 30, "🦑": 60, "🏮": 85, "🌟": 100}
 PROMPTS = 7
 MAX_SCORE = PROMPTS * 100
 
-# The catch symbols counted on the leaderboard, best first.
-SHRIMP, LANTERN, SQUID = "🦐", "🏮", "🦑"
+# The catch symbols counted on the leaderboard, best first. The top tier
+# ("shrimp", the game's 100-point answer) shows as a star in the result grid.
+SHRIMP, LANTERN, SQUID = "🌟", "🏮", "🦑"
 
 # Matches the daily header, e.g. "Krillion #47 🦐". Only whitespace may sit
 # between the name and the number: pack results put the pack's emoji there
@@ -85,6 +86,27 @@ def _short(text: str, limit: int = 60) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def _star_answers(info: dict, slot: int) -> list[str]:
+    """
+    The archived shrimp answers for one prompt slot, as a list.
+
+    Tolerates the current per-slot list form and the earlier single-string
+    form, returning [] when nothing is archived for that slot.
+    """
+    shrimp = info.get("shrimp") or []
+    if slot >= len(shrimp):
+        return []
+    entry = shrimp[slot]
+    if not entry:
+        return []
+    return [entry] if isinstance(entry, str) else [a for a in entry if a]
+
+
+def _star_note(answers: list[str], limit: int = 40) -> str:
+    """Format one or more star answers for display (joined with ' / ')."""
+    return _short(" / ".join(answers), limit)
+
+
 class Krillion(LeaderboardCog, name="krillion"):
     GAME = "krillion"
 
@@ -103,30 +125,28 @@ class Krillion(LeaderboardCog, name="krillion"):
     # ------------------------------------------------------------------ #
 
     @staticmethod
-    def _shrimp_from_reveal(reveal) -> list[str] | None:
+    def _shrimp_from_reveal(reveal) -> list[list[str]] | None:
         """
-        Pull each prompt's single shrimp (score-100) answer from a reveal sheet.
+        Pull each prompt's shrimp (score-100) answers from a reveal sheet.
 
-        Returns a list of ``PROMPTS`` entries (the answer text, or None where a
-        prompt somehow has no score-100 answer), or None if the sheet doesn't
-        have the expected shape.
+        There's usually one, but a prompt can have several, so each entry is a
+        list of all its score-100 answers (possibly empty). Returns a list of
+        ``PROMPTS`` such entries, or None if the sheet's shape is unexpected.
         """
         if not isinstance(reveal, dict):
             return None
         prompts = reveal.get("prompts")
         if not isinstance(prompts, list) or len(prompts) != PROMPTS:
             return None
-        shrimp: list[str | None] = []
+        shrimp: list[list[str]] = []
         for prompt in prompts:
-            answer = next(
-                (
+            shrimp.append(
+                [
                     a.get("answer")
                     for a in (prompt.get("answers") or [])
-                    if a.get("score") == SHRIMP_POINTS
-                ),
-                None,
+                    if a.get("score") == SHRIMP_POINTS and a.get("answer")
+                ]
             )
-            shrimp.append(answer)
         return shrimp
 
     async def _store_today(self, today, reveal) -> bool:
@@ -214,8 +234,8 @@ class Krillion(LeaderboardCog, name="krillion"):
         Find the 7-symbol result grid and return its per-prompt point values.
 
         Only a line made up entirely of answer symbols counts, so the 🦐 in the
-        "Krillion #47 🦐" header can't pollute the grid. Returns None if no
-        such line is present.
+        "Krillion #47 🦐" header (which also has text) can't pollute the grid.
+        Returns None if no such line is present.
         """
         for line in content.splitlines():
             stripped = line.strip().replace("️", "")  # tolerate emoji VS16
@@ -444,32 +464,28 @@ class Krillion(LeaderboardCog, name="krillion"):
             for puzzle, answers in entry["answers"].items():
                 if answers:
                     grids[puzzle].append(answers)
-        questions = []  # (average, text, day, shrimp answer or None)
+        questions = []  # (average, text, day, [star answers])
         for puzzle, all_answers in grids.items():
             info = prompt_info.get(puzzle) or {}
             texts = info.get("prompts") or []
-            shrimp_answers = info.get("shrimp") or []
             if len(all_answers) < 2:
                 continue
             for slot, text in enumerate(texts[:PROMPTS]):
                 average = sum(answers[slot] for answers in all_answers) / len(
                     all_answers
                 )
-                # Only name the shrimp answer when someone here actually caught
-                # it, so we don't reveal answers nobody in the channel found.
+                # Only name the shrimp answer(s) when someone here actually
+                # caught it, so we don't reveal answers nobody in the channel
+                # found. (A prompt can have more than one star answer.)
                 got_shrimp = any(
                     answers[slot] == VALUES[SHRIMP] for answers in all_answers
                 )
-                ideal = (
-                    shrimp_answers[slot]
-                    if got_shrimp and slot < len(shrimp_answers)
-                    else None
-                )
-                questions.append((average, text, puzzle, ideal))
+                stars = _star_answers(info, slot) if got_shrimp else []
+                questions.append((average, text, puzzle, stars))
 
-        def _line(average, text, puzzle, ideal) -> str:
-            ideal_note = f" — 🦐 {_short(ideal, 30)}" if ideal else ""
-            return f"• {_short(text)} — avg {average:,.0f} pts (#{puzzle}){ideal_note}"
+        def _line(average, text, puzzle, stars) -> str:
+            star_note = f" — {SHRIMP} {_star_note(stars, 30)}" if stars else ""
+            return f"• {_short(text)} — avg {average:,.0f} pts (#{puzzle}){star_note}"
 
         if questions:
             questions.sort(key=lambda q: (-q[0], q[2]))
@@ -542,27 +558,27 @@ class Krillion(LeaderboardCog, name="krillion"):
             ):
                 lines.append(f"{symbol} {points} pts — **{catches[points]}**")
 
-        # Which questions they caught a shrimp on, naming the specific answer
-        # (each prompt has a single shrimp answer, so a shrimp on that prompt
-        # means they gave it). Needs the archived sheet, so only days from the
-        # bot's deployment onward can be named.
+        # Which questions they caught a shrimp on, naming the star answer where
+        # it's known. Usually a prompt has a single star answer, so a shrimp
+        # pins it down; where a prompt has several we list them all with "/".
+        # Needs the archived sheet, so only days from the bot's deployment
+        # onward can be named.
         prompt_info = await self.bot.database.get_puzzle_info(self.GAME)
         shrimps = []
         for puzzle in sorted(mine):
             answers = answers_kept[(author_id, puzzle)]
             info = prompt_info.get(puzzle) or {}
             texts = info.get("prompts") or []
-            shrimp_answers = info.get("shrimp") or []
             if not answers:
                 continue
             for slot, value in enumerate(answers):
                 if value != VALUES[SHRIMP] or slot >= len(texts):
                     continue
-                answer = shrimp_answers[slot] if slot < len(shrimp_answers) else None
-                named = f" → **{_short(answer, 40)}**" if answer else ""
+                stars = _star_answers(info, slot)
+                named = f" → **{_star_note(stars)}**" if stars else ""
                 shrimps.append(f"• {_short(texts[slot])}{named} (#{puzzle})")
         if shrimps:
-            lines.append("### Shrimp catches 🦐")
+            lines.append(f"### Shrimp catches {SHRIMP}")
             lines += shrimps[:8]
             if len(shrimps) > 8:
                 lines.append(f"…and {len(shrimps) - 8} more")
