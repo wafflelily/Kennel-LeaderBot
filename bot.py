@@ -197,6 +197,10 @@ class DiscordBot(commands.Bot):
             "in my lanternfish era 🏮",
             "⬛ it's dark down here",
             "if in doubt: Republic of the Congo",
+            "civ 5 came in clutch again",
+            "early cat gets the fish",
+            "headmate diff",
+            "tfw sistercucked",
         ]
         # Statuses still to show this round; refilled with a fresh shuffle
         # once empty, so every status gets a turn before any repeats.
