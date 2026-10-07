@@ -192,9 +192,29 @@ class TestOnMessage:
         message = make_message(20, "score 5", when=datetime(2026, 8, 2, tzinfo=timezone.utc))
         await cog.on_message(message)
         assert await stored_values(db) == [5]
-        # Scan pointer advances so a later command doesn't re-fetch this tail.
+        # The scan pointer stays put: only a history scan may advance it.
         newest_id, _ = await db.get_leaderboard_scan("scoregame", CHANNEL_ID)
-        assert newest_id == 20
+        assert newest_id == 10
+
+    async def test_live_capture_does_not_skip_messages_missed_while_offline(
+        self, cog, db
+    ):
+        # Regression: the bot was offline while 11 and 12 were posted, then
+        # captured 13 live. Advancing the pointer to 13 made the next sync's
+        # forward catch-up start after it, losing 11 and 12 for good.
+        when = datetime(2026, 8, 2, tzinfo=timezone.utc)
+        channel = FakeChannel([make_message(10, "score 1", when=when)])
+        await cog._sync_channel(channel, AUG_1)
+
+        missed = [make_message(11, "score 2", when=when), make_message(12, "score 3", when=when)]
+        live = make_message(13, "score 4", when=when)
+        channel.messages += [*missed, live]
+        await cog.on_message(live)
+
+        await cog._sync_channel(channel, AUG_1)
+        assert sorted(await stored_values(db)) == [1, 2, 3, 4]
+        newest_id, _ = await db.get_leaderboard_scan("scoregame", CHANNEL_ID)
+        assert newest_id == 13
 
     async def test_non_results_and_bots_are_ignored(self, cog, db):
         await db.set_leaderboard_scan("scoregame", CHANNEL_ID, 10, AUG_1.isoformat())

@@ -383,7 +383,7 @@ class LeaderboardCog(commands.Cog):
             return
         # Only track channels a command has already initialised, so we never
         # create a half-populated window that a later query would trust.
-        newest_id, oldest_after = await self.bot.database.get_leaderboard_scan(
+        _, oldest_after = await self.bot.database.get_leaderboard_scan(
             self.GAME, message.channel.id
         )
         if oldest_after is None:
@@ -398,11 +398,10 @@ class LeaderboardCog(commands.Cog):
             played_on,
             payload,
         )
-        # Advance the scan pointer so a later command doesn't re-scan this tail.
-        if newest_id is None or message.id > newest_id:
-            await self.bot.database.set_leaderboard_scan(
-                self.GAME, message.channel.id, message.id, oldest_after
-            )
+        # Deliberately leave the scan pointer alone: a live message says nothing
+        # about what was posted while the bot was offline, so advancing past it
+        # would skip that gap forever. The next command's forward catch-up
+        # re-reads this tail, which is cheap and idempotent (rows are upserts).
         await self.on_result_captured(message, played_on, payload)
 
     @commands.Cog.listener()
