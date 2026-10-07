@@ -45,12 +45,12 @@ rather than re-scanning the whole channel each time.
 import asyncio
 import re
 from collections import defaultdict
-from datetime import date
+from datetime import date, datetime, time, timedelta, timezone
 
 import aiohttp
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord.ext.commands import Context
 
 from leaderboard.base import LeaderboardCog, month_choices
@@ -71,6 +71,37 @@ SCORE_RE = re.compile(r"#?(\d+)\s*-\s*(\d+(?:\.\d+)?)\s*/\s*10\b")
 # in the shared result (e.g. "#714" -> day=714).
 API_URL = "https://catfishing.net/api/game?day={day}"
 
+# Puzzle stats are stored in the database (``puzzle_info``) so a restart
+# doesn't mean re-fetching them all. The global solve rates keep moving while
+# a puzzle is new, so a stored puzzle is re-fetched once it's 24 hours old and
+# again at 7 days old, after which it's treated as settled.
+REFRESH_AFTER = (timedelta(hours=24), timedelta(days=7))
+# Puzzle numbers are a daily sequence: #836 is the puzzle for 2026-10-07.
+# A puzzle comes out at midnight in the earliest timezone (UTC+14), i.e. 14
+# hours before its date starts in UTC.
+DATE_ANCHOR = date(2026, 10, 7).toordinal() - 836
+RELEASE_LEAD = timedelta(hours=14)
+# Throttling for catfishing.net, which answers HTTP 429 once requests come
+# in too fast (seen at ~6/s; ~1.8/s one at a time was fine). Never more than
+# this many requests at once (across all commands), and for big batches a
+# pause after each request, keeping them to ~1.4/s — a cold /mystats is
+# slower, but only once, since the results are stored.
+MAX_CONCURRENT_FETCHES = 3
+BIG_BATCH = 10
+BIG_BATCH_DELAY = 2.0
+# If rate-limited anyway, every fetch pauses (for the site's Retry-After, or
+# this long if it doesn't say) and the request is retried a few times.
+RATE_LIMIT_PAUSE = 15.0
+RATE_LIMIT_RETRIES = 3
+
+
+class RateLimited(Exception):
+    """catfishing.net answered HTTP 429; ``retry_after`` is how long to wait."""
+
+    def __init__(self, retry_after: float) -> None:
+        super().__init__(retry_after)
+        self.retry_after = retry_after
+
 # Posted the moment a puzzle's group coverage reaches all 10 questions.
 GROUP_COMPLETE_MESSAGE = "🎉🐈🔟🐈🎉"
 # How many of the hardest answers to show.
@@ -87,10 +118,20 @@ class Catfishing(LeaderboardCog, name="catfishing"):
 
     def __init__(self, bot) -> None:
         super().__init__(bot)
-        # Cache of puzzle stats keyed by puzzle number: {day: (titles, rates)}.
-        # Historical puzzle stats don't change, so caching across invocations
-        # is safe and avoids re-fetching.
-        self._puzzle_cache: dict[int, tuple] = {}
+        # In-memory mirror of the stored puzzle stats, keyed by puzzle number:
+        # {day: {"titles", "rates", "fetched_at"}}. Loaded from the database
+        # on first use and written through on every fetch.
+        self._puzzle_cache: dict[int, dict] | None = None
+        self._fetch_slots = asyncio.Semaphore(MAX_CONCURRENT_FETCHES)
+        # When catfishing.net rate-limits us, no fetch starts before this
+        # (event-loop time).
+        self._paused_until = 0.0
+
+    async def cog_load(self) -> None:
+        self.stats_refresher.start()
+
+    async def cog_unload(self) -> None:
+        self.stats_refresher.cancel()
 
     async def _fetch_puzzle(self, session: aiohttp.ClientSession, day: int):
         """
@@ -98,28 +139,155 @@ class Catfishing(LeaderboardCog, name="catfishing"):
 
         Returns ``(titles, rates)`` — parallel lists where ``titles[i]`` is the
         answer for question ``i`` and ``rates[i]`` is the global percentage of
-        players who got it right (lower = harder). Returns None on any failure.
+        players who got it right (lower = harder). Returns None on any failure,
+        except a rate limit, which raises ``RateLimited``.
         """
-        if day in self._puzzle_cache:
-            return self._puzzle_cache[day]
         try:
             async with session.get(
                 API_URL.format(day=day),
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
+                if resp.status == 429:
+                    try:
+                        retry_after = float(resp.headers.get("Retry-After", ""))
+                    except ValueError:
+                        retry_after = RATE_LIMIT_PAUSE
+                    raise RateLimited(retry_after)
                 if resp.status != 200:
+                    self.bot.logger.warning(
+                        f"catfishing.net returned HTTP {resp.status} for puzzle #{day}"
+                    )
                     return None
                 data = await resp.json()
-        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:
+            self.bot.logger.warning(
+                f"Couldn't fetch catfishing.net puzzle #{day}: {e!r}"
+            )
             return None
 
         articles = data.get("articles") or []
         stats_articles = (data.get("stats") or {}).get("articles") or []
         titles = [a.get("title") for a in articles]
         rates = [sa.get("correctRate") for sa in stats_articles]
-        result = (titles, rates)
-        self._puzzle_cache[day] = result
-        return result
+        return titles, rates
+
+    # ------------------------------------------------------------------ #
+    # Stored puzzle stats
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _released_at(day: int) -> datetime:
+        """When puzzle ``day`` came out (midnight UTC+14 on its date)."""
+        midnight = datetime.combine(
+            date.fromordinal(day + DATE_ANCHOR), time(0), tzinfo=timezone.utc
+        )
+        return midnight - RELEASE_LEAD
+
+    @classmethod
+    def _refresh_due(cls, day: int, stored: dict, now: datetime) -> bool:
+        """
+        Whether a stored puzzle should be re-fetched: it was fetched before
+        the 24-hour or 7-day mark and that mark has now passed.
+        """
+        fetched_at = datetime.fromisoformat(stored["fetched_at"])
+        released = cls._released_at(day)
+        return any(
+            fetched_at < released + after <= now for after in REFRESH_AFTER
+        )
+
+    async def _load_stored(self) -> dict[int, dict]:
+        """The stored puzzle stats, loaded from the database once."""
+        if self._puzzle_cache is None:
+            self._puzzle_cache = await self.bot.database.get_puzzle_info(self.GAME)
+        return self._puzzle_cache
+
+    async def _fetch_and_store(self, days: list[int]) -> None:
+        """
+        Fetch ``days`` from catfishing.net and store whatever succeeds.
+
+        At most ``MAX_CONCURRENT_FETCHES`` requests run at once across the
+        whole cog; a big batch also pauses after each request, so it takes
+        longer rather than hammering the site. A rate limit pauses every
+        fetch for as long as the site asks, then retries.
+        """
+        if not days:
+            return
+        stored = await self._load_stored()
+        delay = BIG_BATCH_DELAY if len(days) > BIG_BATCH else 0
+        loop = asyncio.get_running_loop()
+
+        async def fetch_one(session, day):
+            result = None
+            async with self._fetch_slots:
+                for attempt in range(RATE_LIMIT_RETRIES + 1):
+                    wait = self._paused_until - loop.time()
+                    if wait > 0:
+                        await asyncio.sleep(wait)
+                    try:
+                        result = await self._fetch_puzzle(session, day)
+                        break
+                    except RateLimited as limited:
+                        if attempt == RATE_LIMIT_RETRIES:
+                            self.bot.logger.warning(
+                                f"catfishing.net kept rate-limiting puzzle #{day}; "
+                                "giving up for now"
+                            )
+                            break
+                        now = loop.time()
+                        if self._paused_until <= now:  # log each pause once
+                            self.bot.logger.warning(
+                                "catfishing.net is rate-limiting; pausing fetches "
+                                f"for {limited.retry_after:g}s"
+                            )
+                        self._paused_until = max(
+                            self._paused_until, now + limited.retry_after
+                        )
+                if delay:
+                    await asyncio.sleep(delay)
+            if result is None:
+                return
+            titles, rates = result
+            payload = {
+                "titles": titles,
+                "rates": rates,
+                "fetched_at": datetime.now(timezone.utc).isoformat(),
+            }
+            await self.bot.database.set_puzzle_info(self.GAME, day, payload)
+            stored[day] = payload
+
+        async with aiohttp.ClientSession() as session:
+            await asyncio.gather(*(fetch_one(session, day) for day in days))
+
+    async def _puzzle_stats(self, days) -> dict[int, tuple | None]:
+        """
+        ``(titles, rates)`` for each puzzle in ``days``, or None where it
+        couldn't be fetched. Uses the stored stats, fetching only the
+        puzzles that aren't stored yet.
+        """
+        stored = await self._load_stored()
+        await self._fetch_and_store([day for day in days if day not in stored])
+        return {
+            day: (stored[day]["titles"], stored[day]["rates"]) if day in stored else None
+            for day in days
+        }
+
+    @tasks.loop(hours=1)
+    async def stats_refresher(self) -> None:
+        """Re-fetch stored puzzles that have reached their 24h or 7-day mark."""
+        stored = await self._load_stored()
+        now = datetime.now(timezone.utc)
+        due = sorted(
+            day for day, info in stored.items() if self._refresh_due(day, info, now)
+        )
+        if due:
+            await self._fetch_and_store(due)
+            self.bot.logger.info(
+                f"Refreshed catfishing.net stats for {len(due)} puzzle(s)"
+            )
+
+    @stats_refresher.before_loop
+    async def before_stats_refresher(self) -> None:
+        await self.bot.wait_until_ready()
 
     @staticmethod
     def _score_grid(grid, cat, egg):
@@ -420,11 +588,7 @@ class Catfishing(LeaderboardCog, name="catfishing"):
         # Hardest answers anyone in the channel got. Pull each puzzle's global
         # stats from catfishing.net and rank the solved questions by how few
         # players worldwide got them right.
-        async with aiohttp.ClientSession() as session:
-            fetched = await asyncio.gather(
-                *(self._fetch_puzzle(session, day) for day in solvers)
-            )
-        puzzle_stats = dict(zip(solvers, fetched, strict=True))
+        puzzle_stats = await self._puzzle_stats(list(solvers))
 
         answers = []  # (rate, title, puzzle, names)
         for puzzle, positions in solvers.items():
@@ -517,13 +681,9 @@ class Catfishing(LeaderboardCog, name="catfishing"):
         # gimmes everyone else in the channel somehow missed).
         answers = []  # (rate, title, puzzle)
         if unique_positions:
-            async with aiohttp.ClientSession() as session:
-                fetched = await asyncio.gather(
-                    *(self._fetch_puzzle(session, day) for day in unique_positions)
-                )
-            for (puzzle, positions), stats in zip(
-                unique_positions.items(), fetched, strict=True
-            ):
+            fetched = await self._puzzle_stats(list(unique_positions))
+            for puzzle, positions in unique_positions.items():
+                stats = fetched[puzzle]
                 if stats is None:
                     continue
                 titles, rates = stats

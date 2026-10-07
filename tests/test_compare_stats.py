@@ -1,5 +1,6 @@
 """Tests for each cog's compare_stats (the /mystats comparative numbers)."""
 
+import logging
 from datetime import date
 from types import SimpleNamespace
 
@@ -182,13 +183,15 @@ class TestFoodGuessrCompare:
 
 class TestCatfishingCompare:
     @pytest.fixture
-    def cog(self, monkeypatch):
+    def cog(self, db, monkeypatch):
         """A Catfishing cog with the puzzle-stats API replaced by a canned map.
 
         Tests put ``(titles, rates)`` tuples into ``cog.stats_map`` per puzzle;
         anything missing behaves like an API failure (None).
         """
-        catfishing = Catfishing(SimpleNamespace())
+        catfishing = Catfishing(
+            SimpleNamespace(database=db, logger=logging.getLogger("test"))
+        )
         catfishing.stats_map = {}
 
         async def fake_fetch(session, day):
