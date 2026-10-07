@@ -22,6 +22,22 @@ SAMPLE = """I ran the August 20th Gauntlet in 15 minutes and 51.34 seconds!
 🟩 Paire: 0:43.21 (−10s) ✨
 """
 
+# After Gauntle swapped Chromal and Shapeup out for Conduit and Angle.
+NEW_LINEUP_SAMPLE = """I ran the October 7th Gauntle(t) in 5 minutes and 59.80 seconds!
+
+🟩 Sudoku: 0:46.84 (−10s) ✨
+🟨 Paire: 1:17.31 (+30s)
+🟩 Wordy: 0:45.00 (−5s) ✨
+🟩 Conduit: 0:13.64 (−15s) ✨
+🟩 Clambers: 0:21.91 (−8s) ✨
+🟩 Queens: 0:25.03 (−5s) ✨
+🟩 Angle: 0:16.51 (−1s) ✨
+🟩 Mines: 0:51.53 (−15s) ✨
+🟩 Nonogram: 1:29.83 (−30s) ✨
+🟩 Crossword: 0:29.43 (−20s) ✨
+🟩 Ratiole: 0:04.87 (−19s) ✨
+"""
+
 
 @pytest.fixture
 def cog():
@@ -48,6 +64,28 @@ class TestParse:
         # here has one); a big bonus can push the effective time negative.
         ratiole = payload["categories"]["Ratiole"]
         assert ratiole["raw"] + ratiole["adj"] == pytest.approx(-2.37)
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            NEW_LINEUP_SAMPLE,
+            # Emoji left as Discord shortcodes rather than rendered.
+            NEW_LINEUP_SAMPLE.replace("🟩", ":green_square:")
+            .replace("🟨", ":yellow_square:")
+            .replace("✨", ":sparkles:"),
+        ],
+    )
+    def test_new_lineup(self, cog, message):
+        played_on, payload = cog.parse(message, date(2026, 10, 7))
+        assert played_on == date(2026, 10, 7)
+        assert payload["total"] == pytest.approx(5 * 60 + 59.80)
+        assert sorted(payload["categories"]) == [
+            "Angle", "Clambers", "Conduit", "Crossword", "Mines", "Nonogram",
+            "Paire", "Queens", "Ratiole", "Sudoku", "Wordy",
+        ]
+        conduit = payload["categories"]["Conduit"]
+        assert conduit["raw"] == pytest.approx(13.64)
+        assert conduit["adj"] == pytest.approx(-15.0)
 
     def test_ascii_hyphen_bonus(self, cog):
         message = (

@@ -7,25 +7,31 @@ recorded in each individual category over a period.
 
 Expected message format (as copy-pasted from Gauntle):
 
-    I ran the August 20th Gauntle(t) in 15 minutes and 51.34 seconds!
+    I ran the October 7th Gauntle(t) in 5 minutes and 59.80 seconds!
 
-    🟩 Sudoku: 0:52.24 (−10s) ✨
-    🟨 Crossword: 1:44.54 (−12s)
-    🟩 Queens: 0:21.11 (−5s) ✨
-    🟩 Chromal: 0:20.54 (−10s) ✨
-    🟨 Wordy: 2:08.24 (+5s)
-    🟥 Clambers: 0:45.30 (skip +90s)
-    🟥 Nonogram: 4:30.78 (skip +90s)
-    🟩 Mines: 1:40.31 (−15s) ✨
-    🟨 Shapeup: 0:07.71 (+1s)
-    🟩 Ratiole: 0:04.63 (−7s) ✨
-    🟩 Paire: 0:43.21 (−10s) ✨
+    🟩 Sudoku: 0:46.84 (−10s) ✨
+    🟨 Paire: 1:17.31 (+30s)
+    🟩 Wordy: 0:45.00 (−5s) ✨
+    🟩 Conduit: 0:13.64 (−15s) ✨
+    🟩 Clambers: 0:21.91 (−8s) ✨
+    🟩 Queens: 0:25.03 (−5s) ✨
+    🟩 Angle: 0:16.51 (−1s) ✨
+    🟩 Mines: 0:51.53 (−15s) ✨
+    🟩 Nonogram: 1:29.83 (−30s) ✨
+    🟩 Crossword: 0:29.43 (−20s) ✨
+    🟩 Ratiole: 0:04.87 (−19s) ✨
 
 The header line gives the run's date and total time. Each category line gives a
 raw solve time and a bonus (e.g. ``−10s``) or penalty (e.g. ``+5s``, ``skip
 +90s``). A category's *effective* time — used for the per-category bests — is
 the raw time plus that adjustment, so a fast solve with a big bonus can even go
 negative.
+
+Gauntle occasionally swaps games in and out (e.g. Chromal and Shapeup were
+replaced by Conduit and Angle), though a run always has 11 of them. Category
+names are therefore never hard-coded: the leaderboard shows whichever games
+were played in the requested month, and /mystats treats the games in the
+channel's most recent run as the current lineup.
 
 Parsed results are cached in the database (see ``leaderboard.base``); the
 command does an incremental catch-up scan and reads its aggregates from there
@@ -489,17 +495,40 @@ class Gauntle(LeaderboardCog, name="gauntle"):
             f"⚡ Personal best run: **{_fmt_time(mine[best_day])}** "
             f"(on {best_day:%b %d})",
         ]
-        if my_best:
-            # "### " lines become their own embed field in /mystats.
+
+        # Gauntle swaps games in and out over time, so split the player's bests
+        # into the current lineup (the games in the channel's most recent run)
+        # and retired games that no longer appear.
+        latest = max(row["played_on"] for row in rows)
+        lineup = {
+            name
+            for row in rows
+            if row["played_on"] == latest
+            for name in row["payload"].get("categories", {})
+        }
+        current = sorted(name for name in my_best if name in lineup)
+        retired = sorted(name for name in my_best if name not in lineup)
+
+        def best_line(name: str) -> str:
+            crown = " 👑" if my_best[name] == channel_best[name] else ""
+            return f"• {name}: {_fmt_time(my_best[name])}{crown}"
+
+        # "### " lines become their own embed field in /mystats.
+        if current:
             lines.append("### Personal category bests (👑 = channel record)")
-            for name in sorted(my_best):
-                crown = " 👑" if my_best[name] == channel_best[name] else ""
-                lines.append(f"• {name}: {_fmt_time(my_best[name])}{crown}")
-            # A "dream run": the sum of every category's personal best, as if
-            # all their best category times had landed in one run.
-            lines.append(
-                f"**Sum of bests: {_fmt_time(sum(my_best.values()))}**"
-            )
+            lines.extend(best_line(name) for name in current)
+            # A "dream run": the sum of every current game's personal best, as
+            # if all their best category times had landed in one run. Only
+            # meaningful once they've a time for every game in the lineup.
+            missing = sorted(lineup - my_best.keys())
+            if missing:
+                lines.append(f"Sum of bests: needs a time for {', '.join(missing)}")
+            else:
+                total = sum(my_best[name] for name in current)
+                lines.append(f"**Sum of bests: {_fmt_time(total)}**")
+        if retired:
+            lines.append("### Retired category bests")
+            lines.extend(best_line(name) for name in retired)
         return lines
 
 

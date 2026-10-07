@@ -55,6 +55,28 @@ class TestGauntleBuilder:
         )
         assert await cog.build_leaderboard(channel, (2026, 8), "August 2026") is None
 
+    async def test_only_games_played_that_month_are_listed(self, db, channel):
+        cog = Gauntle(SimpleNamespace(database=db))
+        # September still had Chromal; by October it was replaced by Conduit.
+        await db.upsert_leaderboard_result(
+            "gauntle", 100, 1, 42, "alice", date(2026, 9, 30),
+            {"total": 300.0, "categories": {
+                "Sudoku": {"raw": 50.0, "adj": 0.0},
+                "Chromal": {"raw": 20.0, "adj": 0.0},
+            }},
+        )
+        await db.upsert_leaderboard_result(
+            "gauntle", 100, 2, 42, "alice", date(2026, 10, 1),
+            {"total": 300.0, "categories": {
+                "Sudoku": {"raw": 50.0, "adj": 0.0},
+                "Conduit": {"raw": 15.0, "adj": 0.0},
+            }},
+        )
+        october = (await cog.build_leaderboard(channel, (2026, 10), "October 2026")).fields[0].value
+        assert "Conduit" in october and "Chromal" not in october
+        september = (await cog.build_leaderboard(channel, (2026, 9), "September 2026")).fields[0].value
+        assert "Chromal" in september and "Conduit" not in september
+
 
 class TestFoodGuessrBuilder:
     async def test_empty_month_returns_none(self, db, channel):

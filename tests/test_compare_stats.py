@@ -35,8 +35,13 @@ class TestGauntleCompare:
             # Day B: contested, P2 fastest. P2's category is an old-format row.
             row(P1, date(2026, 8, 2), {"total": 110.0, "categories": {"Mines": {"raw": 90.0, "adj": 0.0}}}),
             row(P2, date(2026, 8, 2), {"total": 105.0, "categories": {"Mines": 80.0}}),
-            # Day C: P1 alone (must not count as a contested win).
-            row(P1, date(2026, 8, 3), {"total": 90.0, "categories": {"Wordy": {"raw": 40.0, "adj": 0.0}}}),
+            # Day C: P1 alone (must not count as a contested win). The latest
+            # run, so its games are the current lineup.
+            row(P1, date(2026, 8, 3), {"total": 90.0, "categories": {
+                "Wordy": {"raw": 40.0, "adj": 0.0},
+                "Sudoku": {"raw": 70.0, "adj": 0.0},
+                "Mines": {"raw": 100.0, "adj": 0.0},
+            }}),
         ]
 
     async def test_lines(self, cog, rows):
@@ -81,6 +86,46 @@ class TestGauntleCompare:
         assert "1:40.00" in lines[2]
         # No categories at all: the category-bests section is omitted.
         assert len(lines) == 3
+
+    async def test_retired_games_are_split_out_of_the_sum(self, cog):
+        rows = [
+            # Old lineup: Sudoku + Chromal.
+            row(P1, date(2026, 9, 30), {"total": 100.0, "categories": {
+                "Sudoku": {"raw": 50.0, "adj": 0.0},
+                "Chromal": {"raw": 20.0, "adj": 0.0},
+            }}),
+            # Current lineup: Chromal swapped for Conduit.
+            row(P1, date(2026, 10, 7), {"total": 100.0, "categories": {
+                "Sudoku": {"raw": 60.0, "adj": 0.0},
+                "Conduit": {"raw": 15.0, "adj": 0.0},
+            }}),
+        ]
+        lines = await cog.compare_stats(rows, P1)
+        assert lines[3:] == [
+            "### Personal category bests (👑 = channel record)",
+            "• Conduit: 15.00s 👑",
+            "• Sudoku: 50.00s 👑",
+            # Sudoku 50 + Conduit 15; the retired Chromal isn't counted.
+            "**Sum of bests: 1:05.00**",
+            "### Retired category bests",
+            "• Chromal: 20.00s 👑",
+        ]
+
+    async def test_sum_of_bests_needs_every_current_game(self, cog):
+        rows = [
+            # P1 only played under the old lineup.
+            row(P1, date(2026, 9, 30), {"total": 100.0, "categories": {
+                "Sudoku": {"raw": 50.0, "adj": 0.0},
+                "Chromal": {"raw": 20.0, "adj": 0.0},
+            }}),
+            row(P2, date(2026, 10, 7), {"total": 100.0, "categories": {
+                "Sudoku": {"raw": 60.0, "adj": 0.0},
+                "Conduit": {"raw": 15.0, "adj": 0.0},
+            }}),
+        ]
+        lines = await cog.compare_stats(rows, P1)
+        assert "Sum of bests: needs a time for Conduit" in lines
+        assert not any(line.startswith("**Sum of bests") for line in lines)
 
     async def test_unknown_player_returns_none(self, cog, rows):
         assert await cog.compare_stats(rows, 999) is None
