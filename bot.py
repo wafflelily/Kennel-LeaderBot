@@ -201,6 +201,13 @@ class DiscordBot(commands.Bot):
             "early cat gets the fish",
             "headmate diff",
             "tfw sistercucked",
+            "all my homies hate clambers",
+            "♪ mine diamonds ♪",
+            "playing yoursweeper",
+            "help me budget this my sub-10 is dying",
+            "goodbye shapeup",
+            "ratiole is always 50:50)",
+            "misclicking minesweeper",
         ]
         # Statuses still to show this round; refilled with a fresh shuffle
         # once empty, so every status gets a turn before any repeats.
