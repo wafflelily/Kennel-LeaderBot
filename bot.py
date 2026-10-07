@@ -175,7 +175,32 @@ class DiscordBot(commands.Bot):
             status.strip()
             for status in os.getenv("STATUSES", "").split(",")
             if status.strip()
-        ] or ["Battery is so cool", "mmm, food", "le catfishing"]
+        ] or [
+            "Battery is so cool",
+            "mmm, food",
+            "le catfishing",
+            "🐟🐟🐟🐟🐟 hehe fish",
+            "🥚 close enough counts",
+            "reading Wikipedia categories for fun",
+            '"1987 births" — narrow it down??',
+            "10/10 cats or I log off",
+            "one cat. ONE. 🐈",
+            "avec l'cooby :3",
+            "girlfriend buff OP",
+            "wowie zowie mamma mia",
+            "oughhhhh",
+            "one day the answer WILL be ayahuasca",
+            "it's twinning friday",
+            "Small Catfishing Humiliation",
+            "fire reacting a 1/10 🔥",
+            "cheating at catfishing (being french)",
+            "in my lanternfish era 🏮",
+            "⬛ it's dark down here",
+            "if in doubt: Republic of the Congo",
+        ]
+        # Statuses still to show this round; refilled with a fresh shuffle
+        # once empty, so every status gets a turn before any repeats.
+        self._status_queue: list[str] = []
 
     async def init_db(self) -> None:
         async with aiosqlite.connect(
@@ -204,13 +229,15 @@ class DiscordBot(commands.Bot):
                         f"Failed to load extension {extension}\n{exception}"
                     )
 
-    @tasks.loop(minutes=1.0)
+    @tasks.loop(minutes=10.0)
     async def status_task(self) -> None:
         """
         Setup the game status task of the bot.
         """
+        if not self._status_queue:
+            self._status_queue = random.sample(self.statuses, len(self.statuses))
         await self.change_presence(
-            activity=discord.Game(random.choice(self.statuses))
+            activity=discord.Game(self._status_queue.pop())
         )
 
     @status_task.before_loop

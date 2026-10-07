@@ -72,6 +72,32 @@ class TestParse:
         message = "#723 - 4/10\nFFFFC nice\nCCFFC"
         assert cog.parse(message, POSTED) is None
 
+    def test_spoilered_wrong_answer_list_is_ignored(self, cog):
+        # The site's optional "show wrong answers" share: the 🐟/🥚 in the
+        # spoilered list must not be counted as extra grid markers.
+        message = (
+            "catfishing dot net  \n828 - 8/10 🎉  \n🐈🐈🐈🐈🐈  \n🐈🐟🐟🐈🐈  \n  \n"
+            "||Q7 🐟 battle of Agincourt  \nQ8 🐟 Rihanna||"
+        )
+        _, payload = cog.parse(message, POSTED)
+        assert payload == {
+            "puzzle": 828, "score": 8.0, "correct": [0, 1, 2, 3, 4, 5, 8, 9]
+        }
+
+    def test_spoilered_list_with_egg_and_skips(self, cog):
+        message = (
+            "catfishing.net\n#829 - 9.5/10 🎉\n🐈🐈🐈🐈🐈\n🐈🐈🐈🐈🥚\n\n"
+            "||Q10 🥚 three monkeys\nSkipped Q6||"
+        )
+        _, payload = cog.parse(message, POSTED)
+        assert payload["puzzle"] == 829
+        assert payload["score"] == 9.5
+
+    def test_spoilered_grid_is_tolerated(self, cog):
+        message = "#723 - 4/10\n||🐟🐟🐟🐟🐈\n🐈🐈🐟🐟🐈||"
+        _, payload = cog.parse(message, POSTED)
+        assert payload["score"] == 4.0
+
     def test_ordinary_chat(self, cog):
         assert cog.parse("I scored 4 out of 10 today", POSTED) is None
 

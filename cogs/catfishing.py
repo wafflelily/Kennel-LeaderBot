@@ -17,6 +17,16 @@ Expected message format (as copy-pasted from catfishing.net):
     🐟🐟🐟🥚🐈
     🐟🐈🐟🐟🐈
 
+The site can optionally append a spoilered list of wrong answers, which is
+ignored:
+
+    catfishing.net
+    #829 - 9.5/10 🎉
+    🐈🐈🐈🐈🐈
+    🐈🐈🐈🐈🥚
+
+    ||Q10 🥚 three monkeys||
+
 The grid may also be given as text, with C=cat, F=fish, E=egg::
 
     723 - 4/10
@@ -138,8 +148,15 @@ class Catfishing(LeaderboardCog, name="catfishing"):
         Returns ``(score, correct_positions)`` or None if no 10-marker grid
         is present.
         """
-        # Emoji grid.
-        symbols = [ch for ch in content if ch in SYMBOLS]
+        # Emoji grid: only lines made up entirely of grid symbols count, so the
+        # site's optional spoilered wrong-answer list ("||Q7 🐟 Agincourt||")
+        # and other chat can't add stray markers. Spoiler bars and emoji VS16
+        # are tolerated on grid lines.
+        symbols = []
+        for line in content.splitlines():
+            stripped = line.replace("|", "").replace("️", "").strip()
+            if stripped and all(ch in SYMBOLS or ch.isspace() for ch in stripped):
+                symbols += [ch for ch in stripped if ch in SYMBOLS]
         if len(symbols) == QUESTIONS:
             return cls._score_grid(symbols, CAT, EGG)
 

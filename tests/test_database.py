@@ -208,6 +208,15 @@ class TestAutopost:
         assert await db.get_autopost_channels("gauntle") == []
 
 
+class TestLeaderboardChannels:
+    async def test_lists_only_initialised_channels_for_the_game(self, db):
+        await db.set_leaderboard_scan("gauntle", 100, 5, "2026-08-01")
+        await db.set_leaderboard_scan("gauntle", 200, None, "2026-08-01")
+        await db.set_leaderboard_scan("krillion", 300, 5, "2026-08-01")
+        assert sorted(await db.get_leaderboard_channels("gauntle")) == [100, 200]
+        assert await db.get_leaderboard_channels("foodguessr") == []
+
+
 class TestIntroChannels:
     async def test_unset_returns_none(self, db):
         assert await db.get_intro_channel(1) is None

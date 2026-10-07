@@ -33,18 +33,22 @@ names are therefore never hard-coded: the leaderboard shows whichever games
 were played in the requested month, and /mystats treats the games in the
 channel's most recent run as the current lineup.
 
+At the end of each day, any channel where two or more people posted a run for
+that day gets a small team score: the sum of the day's best time in each game
+across all players.
+
 Parsed results are cached in the database (see ``leaderboard.base``); the
 command does an incremental catch-up scan and reads its aggregates from there
 rather than re-scanning the whole channel each time.
 """
 
 import re
-from collections import defaultdict
-from datetime import date
+from collections import Counter, defaultdict
+from datetime import date, datetime, time, timedelta, timezone
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord.ext.commands import Context
 
 from leaderboard.base import MONTHS, LeaderboardCog, month_choices
@@ -73,6 +77,12 @@ ADJ_RE = re.compile(r"([+\-−])\s*(\d+(?:\.\d+)?)\s*s", re.IGNORECASE)
 # many from a message we stop, so trailing text people add doesn't get parsed
 # as extra categories.
 CATEGORIES_PER_RUN = 11
+
+# When the daily team score goes out (UTC): the end of the UTC day, which is
+# just before midnight in winter and just after it in summer for UK players.
+# It covers runs whose header date is that day; if the bot is offline at this
+# moment, that day's team score is skipped.
+TEAM_SCORE_AT = time(hour=23, minute=55, tzinfo=timezone.utc)
 
 
 def _fmt_time(seconds: float) -> str:
@@ -118,6 +128,12 @@ def _fmt_solve(raw: float | None, adj: float | None) -> str:
 
 class Gauntle(LeaderboardCog, name="gauntle"):
     GAME = "gauntle"
+
+    async def cog_load(self) -> None:
+        self.daily_team_score.start()
+
+    async def cog_unload(self) -> None:
+        self.daily_team_score.cancel()
 
     @staticmethod
     def _parse_duration(text: str):
@@ -260,6 +276,85 @@ class Gauntle(LeaderboardCog, name="gauntle"):
             await message.reply("\n".join(parts), mention_author=False)
         except discord.HTTPException:
             pass  # can't reply here; the leaderboard still counts it
+
+    # ------------------------------------------------------------------ #
+    # Daily team score
+    # ------------------------------------------------------------------ #
+
+    async def build_team_score(self, channel, day: date) -> str | None:
+        """
+        The day's team score: a sum of bests across everyone who played.
+
+        For each game, takes the fastest effective time anyone in the channel
+        posted for ``day``'s Gauntle, and sums them — the run the group would
+        have had if each game went to whoever did it best. Returns None unless
+        at least two people posted a run for that day.
+        """
+        rows = await self.bot.database.get_leaderboard_results(
+            self.GAME, channel.id, day.isoformat(), (day + timedelta(days=1)).isoformat()
+        )
+        if len({row["author_id"] for row in rows}) < 2:
+            return None
+
+        names = await self._resolve_names(
+            getattr(channel, "guild", None),
+            [row["author_id"] for row in rows],
+            {row["author_id"]: row["author_name"] for row in rows},
+        )
+
+        # best[game] = (effective time, author_id)
+        best: dict[str, tuple[float, int]] = {}
+        for row in rows:
+            for name, info in row["payload"].get("categories", {}).items():
+                effective = _effective(info)
+                if name not in best or effective < best[name][0]:
+                    best[name] = (effective, row["author_id"])
+        if not best:
+            return None
+
+        team = sum(effective for effective, _ in best.values())
+        # How much faster the team is than the day's fastest solo run.
+        saved = min(row["payload"]["total"] for row in rows) - team
+
+        header = f"🤝 **Team Gauntle for {day:%b %d}: {_fmt_time(team)}**"
+        if saved > 0:
+            header += f" — teamwork saved {_fmt_time(saved)}"
+        lines = [header]
+        # Who held the best time in how many games, most first (ties by name).
+        held = Counter(author_id for _, author_id in best.values())
+        ranked = sorted(held.items(), key=lambda item: (-item[1], names[item[0]].lower()))
+        lines.append(
+            " · ".join(f"{names[author_id]} ×{count}" for author_id, count in ranked)
+        )
+        return "\n".join(lines)
+
+    @tasks.loop(time=TEAM_SCORE_AT)
+    async def daily_team_score(self) -> None:
+        """Post today's team score in every channel where Gauntle is tracked."""
+        today = datetime.now(timezone.utc).date()
+        start = datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
+        for channel_id in await self.bot.database.get_leaderboard_channels(self.GAME):
+            channel = self.bot.get_channel(channel_id)
+            if channel is None:
+                continue
+            try:
+                # Catch up on anything live capture missed before tallying.
+                await self._sync_channel(channel, start - self.SCAN_BUFFER)
+                text = await self.build_team_score(channel, today)
+                if text is not None:
+                    await channel.send(text)
+            except discord.Forbidden:
+                self.bot.logger.warning(
+                    f"Team score: missing permissions in channel {channel_id}"
+                )
+            except Exception:
+                self.bot.logger.error(
+                    f"Team score failed in channel {channel_id}", exc_info=True
+                )
+
+    @daily_team_score.before_loop
+    async def before_daily_team_score(self) -> None:
+        await self.bot.wait_until_ready()
 
     @commands.hybrid_command(
         name="gauntle",

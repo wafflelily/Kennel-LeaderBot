@@ -253,6 +253,17 @@ class DatabaseManager:
         newest_id = int(row[0]) if row[0] is not None else None
         return newest_id, row[1]
 
+    async def get_leaderboard_channels(self, game: str) -> list[int]:
+        """Return every channel a game's cache has been initialised in."""
+        rows = await self.connection.execute(
+            "SELECT channel_id FROM leaderboard_scan "
+            "WHERE game=? AND oldest_after IS NOT NULL",
+            (game,),
+        )
+        async with rows as cursor:
+            result = await cursor.fetchall()
+        return [int(row[0]) for row in result]
+
     async def set_leaderboard_scan(
         self, game: str, channel_id: int, newest_id: int | None, oldest_after: str | None
     ) -> None:

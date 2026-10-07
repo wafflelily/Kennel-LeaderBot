@@ -287,3 +287,63 @@ class TestPersonalBestCelebration:
         # _store is the scan path; a faster old run must stay quiet.
         await cog._store(live_message(2, run_text(6, 10), replies))
         assert replies == []
+
+
+class TestTeamScore:
+    """The end-of-day sum of bests across every player."""
+
+    CHANNEL = SimpleNamespace(id=100)  # no guild: stored names are used
+
+    @pytest.fixture
+    def cog(self, db):
+        return Gauntle(SimpleNamespace(database=db))
+
+    @staticmethod
+    async def post(cog, mid, author_id, text):
+        await cog._store(live_message(mid, text, [], author_id=author_id))
+
+    async def test_needs_two_players(self, cog):
+        await self.post(cog, 1, 1, run_text(5, 5, "Sudoku: 1:00.00"))
+        await self.post(cog, 2, 1, run_text(5, 4, "Sudoku: 0:50.00"))
+        assert await cog.build_team_score(self.CHANNEL, date(2026, 8, 5)) is None
+
+    async def test_sums_each_games_best_across_players(self, cog):
+        # Sudoku best is p2's 45s; Wordy best is p1's 100s -> team 2:25.
+        await self.post(cog, 1, 1, run_text(5, 5, "Sudoku: 1:00.00 (−10s)\nWordy: 1:40.00"))
+        await self.post(cog, 2, 2, run_text(5, 6, "Sudoku: 0:45.00\nWordy: 2:30.00 (−40s)"))
+        text = await cog.build_team_score(self.CHANNEL, date(2026, 8, 5))
+        assert text == (
+            "🤝 **Team Gauntle for Aug 05: 2:25.00** — teamwork saved 2:35.00\n"
+            "p1 ×1 · p2 ×1"
+        )
+
+    async def test_only_counts_that_days_runs(self, cog):
+        await self.post(cog, 1, 1, run_text(5, 5, "Sudoku: 1:00.00"))
+        await self.post(cog, 2, 2, run_text(6, 5, "Sudoku: 0:30.00"))
+        assert await cog.build_team_score(self.CHANNEL, date(2026, 8, 5)) is None
+
+    async def test_daily_task_posts_in_tracked_channels(self, cog, db):
+        today = datetime.now(timezone.utc).date()
+        header = f"I ran the {today:%B} {today.day}th Gauntlet in 5 minutes and 0 seconds!\n"
+        sent = []
+
+        async def send(text):
+            sent.append(text)
+
+        async def no_history():
+            return
+            yield
+
+        channel = SimpleNamespace(
+            id=100, send=send, history=lambda **kwargs: no_history()
+        )
+        cog.bot.get_channel = lambda cid: channel if cid == 100 else None
+        await db.set_leaderboard_scan("gauntle", 100, None, "2026-01-01T00:00:00+00:00")
+        for mid, author_id, sudoku in ((1, 1, "1:00.00"), (2, 2, "0:40.00")):
+            message = live_message(mid, header + f"Sudoku: {sudoku}", [], author_id)
+            message.created_at = datetime.now(timezone.utc)
+            await cog._store(message)
+
+        await cog.daily_team_score()
+        assert len(sent) == 1
+        assert sent[0].startswith(f"🤝 **Team Gauntle for {today:%b %d}: 40.00s**")
