@@ -73,6 +73,8 @@ class TestParse:
             NEW_LINEUP_SAMPLE.replace("🟩", ":green_square:")
             .replace("🟨", ":yellow_square:")
             .replace("✨", ":sparkles:"),
+            # The share text's link line, left on instead of trimmed off.
+            NEW_LINEUP_SAMPLE + "\nRun it yourself at https://gauntle.com/",
         ],
     )
     def test_new_lineup(self, cog, message):
