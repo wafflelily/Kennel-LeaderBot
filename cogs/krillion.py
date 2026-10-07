@@ -23,8 +23,10 @@ Pack results are NOT counted: an emoji between the name and the number
 match the daily patterns.
 
 Each grid symbol is one prompt's answer quality:
-⬛ no submission (0) · 🫧 bubbles (10) · 🐟 fish (30) · 🦑 squid (60) ·
-🏮 lanternfish (85) · 🌟 shrimp (100), so a perfect day is 700. When a grid is
+⬛ no submission (0) · 🫧 bubbles (10) · 🤡 too smart (15) · 🐟 fish (30) ·
+🦑 squid (60) · 🏮 lanternfish (85) · 🌟 shrimp (100), so a perfect day is
+700. "Too smart" is a rare smartass answer, usually one per prompt at most,
+e.g. "Human" for "Name a living mammal native to Africa". When a grid is
 present it's authoritative (the stated score is ignored); the bare form is
 validated strictly (0-700, multiple of 5) so ordinary chat can't match.
 
@@ -35,6 +37,7 @@ does an incremental catch-up scan and reads its aggregates from there.
 """
 
 import asyncio
+import os
 import re
 from collections import Counter, defaultdict
 from datetime import date, time, timezone
@@ -48,13 +51,15 @@ from discord.ext.commands import Context
 from leaderboard.base import LeaderboardCog, month_choices
 
 # Answer symbol -> points. ⬛ means "no submission".
-VALUES = {"⬛": 0, "🫧": 10, "🐟": 30, "🦑": 60, "🏮": 85, "🌟": 100}
+VALUES = {"⬛": 0, "🫧": 10, "🤡": 15, "🐟": 30, "🦑": 60, "🏮": 85, "🌟": 100}
 PROMPTS = 7
 MAX_SCORE = PROMPTS * 100
 
 # The catch symbols counted on the leaderboard, best first. The top tier
 # ("shrimp", the game's 100-point answer) shows as a star in the result grid.
 SHRIMP, LANTERN, SQUID = "🌟", "🏮", "🦑"
+# The rare "too smart" (smartass) answer.
+TOO_SMART = "🤡"
 
 # Matches the daily header, e.g. "Krillion #47 🦐". Only whitespace may sit
 # between the name and the number: pack results put the pack's emoji there
@@ -67,18 +72,30 @@ BARE_RE = re.compile(r"#(\d+)\s+(\d+)")
 # A line consisting solely of a number (the day's total score).
 SCORE_LINE_RE = re.compile(r"^\s*(\d+)\s*$")
 
-# The site only serves the *current* day's data — past days are refused to
-# everyone (it's date-gated, not login-gated) — so the bot archives each day
-# as it appears (daily task + startup catch-up). `/api/today` gives the day
+# The site only serves the *current* day's data publicly — past days sit
+# behind the paid archive (`/api/archive/<day>/reveal`, which needs the $5
+# Unlimited unlock token) — so the bot archives each day as it appears
+# (daily task + startup catch-up), and uses the archive only for days it
+# missed. `/api/today` gives the day
 # number; `/api/reveal?date=<today>` gives the full answer sheet, publicly and
-# without auth, from which we keep each prompt's single shrimp (score-100)
-# answer.
+# without auth, from which we keep each prompt's shrimp (score-100) and too
+# smart (score-15) answers.
 TODAY_URL = "https://krillion.io/api/today"
 REVEAL_URL = "https://krillion.io/api/reveal?date={date}"
+# The paid archive, for filling in days the daily fetch missed (e.g. the bot
+# was offline all day). Needs the Unlimited unlock token, read from the
+# KRILLION_UNLOCK_TOKEN env var and sent as a header; skipped when unset.
+# Only past days are served — today's day isn't in it yet.
+ARCHIVE_URL = "https://krillion.io/api/archive/{day}"
+ARCHIVE_REVEAL_URL = "https://krillion.io/api/archive/{day}/reveal"
+UNLOCK_HEADER = "x-krillion-unlock"
+# Pause between archive requests, to go easy on a one-person site.
+ARCHIVE_DELAY = 1.0
 # When the daily fetch runs (UTC; the puzzle resets at 04:00 UTC).
 FETCH_AT = time(hour=12, tzinfo=timezone.utc)
-# The points value that marks a shrimp answer.
+# The points values that mark a shrimp and a too smart answer.
 SHRIMP_POINTS = 100
+TOO_SMART_POINTS = 15
 
 
 def _short(text: str, limit: int = 60) -> str:
@@ -86,20 +103,31 @@ def _short(text: str, limit: int = 60) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def _star_answers(info: dict, slot: int) -> list[str]:
+def _slot_answers(info: dict, key: str, slot: int) -> list[str]:
     """
-    The archived shrimp answers for one prompt slot, as a list.
+    The archived answers under ``key`` ("shrimp" or "too_smart") for one
+    prompt slot, as a list.
 
     Tolerates the current per-slot list form and the earlier single-string
     form, returning [] when nothing is archived for that slot.
     """
-    shrimp = info.get("shrimp") or []
-    if slot >= len(shrimp):
+    archived = info.get(key) or []
+    if slot >= len(archived):
         return []
-    entry = shrimp[slot]
+    entry = archived[slot]
     if not entry:
         return []
     return [entry] if isinstance(entry, str) else [a for a in entry if a]
+
+
+def _star_answers(info: dict, slot: int) -> list[str]:
+    """The archived shrimp answers for one prompt slot."""
+    return _slot_answers(info, "shrimp", slot)
+
+
+def _too_smart_answers(info: dict, slot: int) -> list[str]:
+    """The archived too smart answers for one prompt slot."""
+    return _slot_answers(info, "too_smart", slot)
 
 
 def _star_note(answers: list[str], limit: int = 40) -> str:
@@ -125,37 +153,41 @@ class Krillion(LeaderboardCog, name="krillion"):
     # ------------------------------------------------------------------ #
 
     @staticmethod
-    def _shrimp_from_reveal(reveal) -> list[list[str]] | None:
+    def _answers_from_reveal(
+        reveal, points: int = SHRIMP_POINTS
+    ) -> list[list[str]] | None:
         """
-        Pull each prompt's shrimp (score-100) answers from a reveal sheet.
+        Pull each prompt's answers worth ``points`` from a reveal sheet — the
+        shrimp (100) answers by default, or the too smart (15) ones.
 
-        There's usually one, but a prompt can have several, so each entry is a
-        list of all its score-100 answers (possibly empty). Returns a list of
-        ``PROMPTS`` such entries, or None if the sheet's shape is unexpected.
+        There's usually at most one, but a prompt can have several, so each
+        entry is a list of all its matching answers (possibly empty). Returns a
+        list of ``PROMPTS`` such entries, or None if the sheet's shape is
+        unexpected.
         """
         if not isinstance(reveal, dict):
             return None
         prompts = reveal.get("prompts")
         if not isinstance(prompts, list) or len(prompts) != PROMPTS:
             return None
-        shrimp: list[list[str]] = []
+        found: list[list[str]] = []
         for prompt in prompts:
-            shrimp.append(
+            found.append(
                 [
                     a.get("answer")
                     for a in (prompt.get("answers") or [])
-                    if a.get("score") == SHRIMP_POINTS and a.get("answer")
+                    if a.get("score") == points and a.get("answer")
                 ]
             )
-        return shrimp
+        return found
 
     async def _store_today(self, today, reveal) -> bool:
         """
         Validate and store one day's archive from the two API payloads.
 
         ``today`` supplies the day number and prompt texts; ``reveal`` (may be
-        None if that fetch failed) supplies the per-prompt shrimp answers.
-        Returns True if stored.
+        None if that fetch failed) supplies the per-prompt shrimp and too smart
+        answers. Returns True if stored.
         """
         if not isinstance(today, dict):
             return False
@@ -168,18 +200,21 @@ class Krillion(LeaderboardCog, name="krillion"):
         if not isinstance(day, int) or len(prompts) != PROMPTS:
             return False
         payload = {"date": today.get("date"), "prompts": prompts}
-        shrimp = self._shrimp_from_reveal(reveal)
+        shrimp = self._answers_from_reveal(reveal, SHRIMP_POINTS)
         if shrimp is not None:
             payload["shrimp"] = shrimp
+            payload["too_smart"] = self._answers_from_reveal(
+                reveal, TOO_SMART_POINTS
+            )
         await self.bot.database.set_puzzle_info(self.GAME, day, payload)
         return True
 
     @staticmethod
-    async def _get_json(session, url):
+    async def _get_json(session, url, headers=None):
         """GET a URL and return parsed JSON, or None on any failure."""
         try:
             async with session.get(
-                url, timeout=aiohttp.ClientTimeout(total=10)
+                url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)
             ) as resp:
                 if resp.status != 200:
                     return None
@@ -187,20 +222,97 @@ class Krillion(LeaderboardCog, name="krillion"):
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
             return None
 
+    @staticmethod
+    def _from_archive(meta, rounds_sheet) -> tuple[dict | None, dict | None]:
+        """
+        Reshape the archive's day and reveal payloads into the ``/api/today``
+        and ``/api/reveal`` shapes, so ``_store_today`` can store them.
+
+        The archive's reveal lists ``rounds`` keyed by prompt id; they're put
+        back into the day's prompt order. Returns ``(None, None)`` if the day
+        payload is unusable, and a None reveal if only the sheet is.
+        """
+        if not isinstance(meta, dict) or not isinstance(meta.get("prompts"), list):
+            return None, None
+        today = {
+            "date": meta.get("date"),
+            "dayNumber": meta.get("game"),
+            "prompts": meta["prompts"],
+        }
+        rounds = (
+            rounds_sheet.get("rounds") if isinstance(rounds_sheet, dict) else None
+        )
+        if not isinstance(rounds, list):
+            return today, None
+        by_id = {r.get("round"): r for r in rounds if isinstance(r, dict)}
+        ids = [p.get("id") for p in meta["prompts"] if isinstance(p, dict)]
+        if any(i not in by_id for i in ids):
+            return today, None
+        return today, {"prompts": [by_id[i] for i in ids]}
+
+    async def _backfill_missing(self, session, today_day: int) -> None:
+        """
+        Fill past days the daily fetch missed from the paid archive.
+
+        A day counts as missing if it was never stored, or was stored without
+        its answer sheet (the reveal fetch failed that day). Does nothing
+        without an unlock token; stops at the first failure and tries again
+        on the next run.
+        """
+        token = os.getenv("KRILLION_UNLOCK_TOKEN")
+        if not token:
+            return
+        stored = await self.bot.database.get_puzzle_info(self.GAME)
+        missing = [
+            day
+            for day in range(1, today_day)
+            if "shrimp" not in stored.get(day, {})
+            or "too_smart" not in stored.get(day, {})
+        ]
+        headers = {UNLOCK_HEADER: token}
+        filled = []
+        for day in missing:
+            meta = await self._get_json(
+                session, ARCHIVE_URL.format(day=day), headers
+            )
+            await asyncio.sleep(ARCHIVE_DELAY)
+            sheet = await self._get_json(
+                session, ARCHIVE_REVEAL_URL.format(day=day), headers
+            )
+            await asyncio.sleep(ARCHIVE_DELAY)
+            today, reveal = self._from_archive(meta, sheet)
+            if today is None or today.get("dayNumber") != day or reveal is None:
+                self.bot.logger.warning(
+                    f"Couldn't fetch Krillion day #{day} from the archive "
+                    "(is KRILLION_UNLOCK_TOKEN still valid?); will retry later"
+                )
+                break
+            if await self._store_today(today, reveal):
+                filled.append(day)
+        if filled:
+            self.bot.logger.info(
+                f"Filled {len(filled)} missed Krillion day(s) from the archive: "
+                + ", ".join(f"#{day}" for day in filled)
+            )
+
     async def _archive_today(self) -> None:
-        """Fetch and archive today's puzzle; failures just try again later."""
+        """
+        Fetch and archive today's puzzle, then fill any missed past days from
+        the archive; failures just try again later.
+        """
         async with aiohttp.ClientSession() as session:
             today = await self._get_json(session, TODAY_URL)
             reveal = None
             if isinstance(today, dict) and today.get("date"):
                 # The reveal sheet is public for the current day and carries the
-                # shrimp answers; a real player can't fetch past days either.
+                # shrimp and too smart answers; past days need the paid archive.
                 reveal = await self._get_json(
                     session, REVEAL_URL.format(date=today["date"])
                 )
-        if await self._store_today(today, reveal):
-            extra = "" if reveal else " (prompts only; answer sheet unavailable)"
-            self.bot.logger.info(f"Archived today's Krillion puzzle{extra}")
+            if await self._store_today(today, reveal):
+                extra = "" if reveal else " (prompts only; answer sheet unavailable)"
+                self.bot.logger.info(f"Archived today's Krillion puzzle{extra}")
+                await self._backfill_missing(session, today["dayNumber"])
 
     @tasks.loop(time=FETCH_AT)
     async def prompt_archiver(self) -> None:
@@ -212,8 +324,8 @@ class Krillion(LeaderboardCog, name="krillion"):
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:
-        # Catch-up fetch on startup: prompts are only available on the day, so
-        # a bot that was asleep at FETCH_AT still archives today's on boot.
+        # Catch-up fetch on startup: a bot that was asleep at FETCH_AT still
+        # archives today's on boot, and fills any missed days from the archive.
         if self._archived_on_boot:
             return
         self._archived_on_boot = True
@@ -233,17 +345,22 @@ class Krillion(LeaderboardCog, name="krillion"):
         """
         Find the 7-symbol result grid and return its per-prompt point values.
 
-        Only a line made up entirely of answer symbols counts, so the 🦐 in the
-        "Krillion #47 🦐" header (which also has text) can't pollute the grid.
-        Returns None if no such line is present.
+        The line must *start* with exactly seven answer symbols (spaces
+        between them are fine); anything after them is ignored, so a comment
+        on the grid line ("🏮⬛🫧🫧🐟🦑🏮 got screwed today") still counts.
+        The 🦐 in the "Krillion #47 🦐" header can't pollute the grid, since
+        that line starts with text. Returns None if no such line is present.
         """
         for line in content.splitlines():
             stripped = line.strip().replace("️", "")  # tolerate emoji VS16
-            if not stripped:
-                continue
-            symbols = [ch for ch in stripped if ch in VALUES]
-            others = [ch for ch in stripped if ch not in VALUES and not ch.isspace()]
-            if others or len(symbols) != PROMPTS:
+            symbols = []
+            for ch in stripped:
+                if ch in VALUES:
+                    symbols.append(ch)
+                elif not ch.isspace():
+                    break
+            # More than seven leading symbols isn't a valid grid either.
+            if len(symbols) != PROMPTS:
                 continue
             return [VALUES[ch] for ch in symbols]
         return None
@@ -464,7 +581,8 @@ class Krillion(LeaderboardCog, name="krillion"):
             for puzzle, answers in entry["answers"].items():
                 if answers:
                     grids[puzzle].append(answers)
-        questions = []  # (average, text, day, [star answers])
+        # (average, text, day, [star answers], [too smart answers])
+        questions = []
         for puzzle, all_answers in grids.items():
             info = prompt_info.get(puzzle) or {}
             texts = info.get("prompts") or []
@@ -481,11 +599,22 @@ class Krillion(LeaderboardCog, name="krillion"):
                     answers[slot] == VALUES[SHRIMP] for answers in all_answers
                 )
                 stars = _star_answers(info, slot) if got_shrimp else []
-                questions.append((average, text, puzzle, stars))
+                # Same rule for the too smart answer, shown on worst questions.
+                got_too_smart = any(
+                    answers[slot] == VALUES[TOO_SMART] for answers in all_answers
+                )
+                clever = _too_smart_answers(info, slot) if got_too_smart else []
+                questions.append((average, text, puzzle, stars, clever))
 
-        def _line(average, text, puzzle, stars) -> str:
+        def _line(average, text, puzzle, stars, clever=()) -> str:
             star_note = f" — {SHRIMP} {_star_note(stars, 30)}" if stars else ""
-            return f"• {_short(text)} — avg {average:,.0f} pts (#{puzzle}){star_note}"
+            clever_note = (
+                f" — {TOO_SMART} {_star_note(clever, 30)}" if clever else ""
+            )
+            return (
+                f"• {_short(text)} — avg {average:,.0f} pts (#{puzzle})"
+                f"{star_note}{clever_note}"
+            )
 
         if questions:
             questions.sort(key=lambda q: (-q[0], q[2]))
@@ -494,7 +623,7 @@ class Krillion(LeaderboardCog, name="krillion"):
             worst = sorted(questions[3:], key=lambda q: (q[0], q[2]))[:3]
             embed.add_field(
                 name="💪 Best questions (group average)",
-                value="\n".join(_line(*q) for q in best),
+                value="\n".join(_line(*q[:4]) for q in best),
                 inline=False,
             )
             if worst:
@@ -554,34 +683,44 @@ class Krillion(LeaderboardCog, name="krillion"):
         if catches:
             lines.append("### Answer counts")
             for symbol, points in (
-                (SHRIMP, 100), (LANTERN, 85), (SQUID, 60), ("🐟", 30), ("🫧", 10),
+                (SHRIMP, 100), (LANTERN, 85), (SQUID, 60), ("🐟", 30),
+                (TOO_SMART, 15), ("🫧", 10),
             ):
+                # Too smart answers are rare, so only show that row once caught.
+                if symbol == TOO_SMART and not catches[points]:
+                    continue
                 lines.append(f"{symbol} {points} pts — **{catches[points]}**")
 
-        # Which questions they caught a shrimp on, naming the star answer where
-        # it's known. Usually a prompt has a single star answer, so a shrimp
-        # pins it down; where a prompt has several we list them all with "/".
-        # Needs the archived sheet, so only days from the bot's deployment
-        # onward can be named.
+        # Which questions they caught a shrimp (or a too smart answer) on,
+        # naming the answer where it's known. Usually a prompt has a single
+        # such answer, so the catch pins it down; where a prompt has several we
+        # list them all with "/". Needs the archived sheet, so only archived
+        # days can be named.
         prompt_info = await self.bot.database.get_puzzle_info(self.GAME)
-        shrimps = []
-        for puzzle in sorted(mine):
-            answers = answers_kept[(author_id, puzzle)]
-            info = prompt_info.get(puzzle) or {}
-            texts = info.get("prompts") or []
-            if not answers:
-                continue
-            for slot, value in enumerate(answers):
-                if value != VALUES[SHRIMP] or slot >= len(texts):
+        for symbol, title, lookup in (
+            (SHRIMP, "Shrimp catches", _star_answers),
+            (TOO_SMART, "Too smart catches", _too_smart_answers),
+        ):
+            caught = []
+            for puzzle in sorted(mine):
+                answers = answers_kept[(author_id, puzzle)]
+                info = prompt_info.get(puzzle) or {}
+                texts = info.get("prompts") or []
+                if not answers:
                     continue
-                stars = _star_answers(info, slot)
-                named = f" → **{_star_note(stars)}**" if stars else ""
-                shrimps.append(f"• {_short(texts[slot])}{named} (#{puzzle})")
-        if shrimps:
-            lines.append(f"### Shrimp catches {SHRIMP}")
-            lines += shrimps[:8]
-            if len(shrimps) > 8:
-                lines.append(f"…and {len(shrimps) - 8} more")
+                for slot, value in enumerate(answers):
+                    if value != VALUES[symbol] or slot >= len(texts):
+                        continue
+                    named_answers = lookup(info, slot)
+                    named = (
+                        f" → **{_star_note(named_answers)}**" if named_answers else ""
+                    )
+                    caught.append(f"• {_short(texts[slot])}{named} (#{puzzle})")
+            if caught:
+                lines.append(f"### {title} {symbol}")
+                lines += caught[:8]
+                if len(caught) > 8:
+                    lines.append(f"…and {len(caught) - 8} more")
         return lines
 
 

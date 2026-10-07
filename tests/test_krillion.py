@@ -1,5 +1,6 @@
 """Tests for the Krillion cog: parsing, leaderboard building and /mystats."""
 
+import logging
 from datetime import date
 from types import SimpleNamespace
 
@@ -52,6 +53,12 @@ class TestParse:
         assert payload["answers"] == [100, 85, 60, 30, 10, 0, 100]
         assert payload["score"] == 385
 
+    def test_too_smart_value(self, cog):
+        message = "Krillion #51 🦐\n400\n\n🦑🤡🦑🦑🦑🦑🏮"
+        _, payload = cog.parse(message, POSTED)
+        assert payload["answers"] == [60, 15, 60, 60, 60, 60, 85]
+        assert payload["score"] == 400
+
     def test_grid_is_authoritative_over_stated_score(self, cog):
         message = "Krillion #10 🦐\n999\n\n🦑🦑🫧🦑🐟🫧🐟"
         _, payload = cog.parse(message, POSTED)
@@ -92,6 +99,28 @@ class TestParse:
     )
     def test_non_results(self, cog, message):
         assert cog.parse(message, POSTED) is None
+
+    def test_comment_after_grid_is_ignored(self, cog):
+        message = "Krillion #49 🦐\n280\n\n🏮⬛🫧🫧🐟🦑🏮 got screwed on a couple today"
+        _, payload = cog.parse(message, POSTED)
+        assert payload["answers"] == [85, 0, 10, 10, 30, 60, 85]
+        assert payload["score"] == 280
+
+    def test_comment_without_a_space_is_ignored(self, cog):
+        message = "Krillion #49 🦐\n280\n\n🏮⬛🫧🫧🐟🦑🏮!!"
+        _, payload = cog.parse(message, POSTED)
+        assert payload["answers"] == [85, 0, 10, 10, 30, 60, 85]
+
+    def test_eight_leading_symbols_is_not_a_grid(self, cog):
+        # A trailing comment can't hide an extra answer symbol.
+        message = "Krillion #49 🦐\n280\n\n🏮⬛🫧🫧🐟🦑🏮 🦑 oops"
+        _, payload = cog.parse(message, POSTED)
+        assert payload == {"puzzle": 49, "score": 280, "answers": None}
+
+    def test_text_before_grid_is_not_a_grid(self, cog):
+        message = "Krillion #49 🦐\n280\n\ntoday: 🏮⬛🫧🫧🐟🦑🏮"
+        _, payload = cog.parse(message, POSTED)
+        assert payload["answers"] is None
 
     def test_wrong_grid_size_falls_back_to_stated_score(self, cog):
         message = "Krillion #47 🦐\n260\n\n🦑🦑🫧🦑🐟🫧"  # six symbols
@@ -146,6 +175,48 @@ class TestCompareStats:
             "🐟 30 pts — **3**",
             "🫧 10 pts — **3**",
         ]
+
+    async def test_answer_counts_include_too_smart_once_caught(self, cog):
+        rows = [
+            row(P1, date(2026, 9, 4), {"puzzle": 51, "score": 400, "answers": [60, 15, 60, 60, 60, 60, 85]}),
+        ]
+        lines = await cog.compare_stats(rows, P1)
+        counts_at = lines.index("### Answer counts")
+        assert lines[counts_at + 1 : counts_at + 7] == [
+            "🌟 100 pts — **0**",
+            "🏮 85 pts — **1**",
+            "🦑 60 pts — **5**",
+            "🐟 30 pts — **0**",
+            "🤡 15 pts — **1**",
+            "🫧 10 pts — **0**",
+        ]
+
+    async def test_too_smart_catches_name_the_answer(self, cog, db):
+        rows = [
+            row(P1, date(2026, 9, 4), {"puzzle": 51, "score": 400, "answers": [60, 15, 60, 60, 60, 60, 85]}),
+        ]
+        too_smart = [[] for _ in range(7)]
+        too_smart[1] = ["Human"]
+        await db.set_puzzle_info(
+            "krillion",
+            51,
+            {
+                "prompts": [f"Q{i}" for i in range(1, 8)],
+                "shrimp": [[f"A{i}"] for i in range(1, 8)],
+                "too_smart": too_smart,
+            },
+        )
+        lines = await cog.compare_stats(rows, P1)
+        assert "### Shrimp catches 🌟" not in lines
+        catches_at = lines.index("### Too smart catches 🤡")
+        assert lines[catches_at + 1 :] == ["• Q2 → **Human** (#51)"]
+
+    async def test_no_too_smart_section_without_a_catch(self, cog, db, rows):
+        await db.set_puzzle_info(
+            "krillion", 46, {"prompts": [f"Q{i}" for i in range(1, 8)]}
+        )
+        lines = await cog.compare_stats(rows, P1)
+        assert "### Too smart catches 🤡" not in lines
 
     async def test_no_grids_means_no_counts_section(self, cog):
         rows = [row(P1, date(2026, 8, 30), {"puzzle": 47, "score": 265, "answers": None})]
@@ -250,11 +321,20 @@ class TestPromptArchive:
         # Each prompt's star answers are stored as a list (usually one).
         assert stored[48]["shrimp"] == [[f"Shrimp{i}"] for i in range(1, 8)]
 
+    async def test_stores_too_smart_answers(self, cog, db):
+        reveal = self._reveal()
+        reveal["prompts"][1]["answers"].append({"answer": "Human", "score": 15})
+        await cog._store_today(self._today(), reveal)
+        stored = await db.get_puzzle_info("krillion")
+        # Most prompts have no too smart answer, so most slots are empty.
+        assert stored[48]["too_smart"] == [[], ["Human"], [], [], [], [], []]
+
     async def test_reveal_failure_stores_prompts_without_shrimp(self, cog, db):
         assert await cog._store_today(self._today(), None) is True
         stored = await db.get_puzzle_info("krillion")
         assert stored[48]["prompts"] == [f"Prompt {i}" for i in range(1, 8)]
         assert "shrimp" not in stored[48]
+        assert "too_smart" not in stored[48]
 
     async def test_prompt_missing_shrimp_answer_stores_empty_list(self, cog, db):
         reveal = self._reveal()
@@ -265,7 +345,7 @@ class TestPromptArchive:
         assert stored[48]["shrimp"][0] == ["Shrimp1"]
 
     def test_shrimp_from_reveal_extracts_one_per_prompt(self, cog):
-        assert cog._shrimp_from_reveal(self._reveal()) == [
+        assert cog._answers_from_reveal(self._reveal()) == [
             [f"Shrimp{i}"] for i in range(1, 8)
         ]
 
@@ -276,14 +356,21 @@ class TestPromptArchive:
             {"answer": "Star B", "score": 100},
             {"answer": "Squid", "score": 60},
         ]
-        assert cog._shrimp_from_reveal(reveal)[0] == ["Star A", "Star B"]
+        assert cog._answers_from_reveal(reveal)[0] == ["Star A", "Star B"]
+
+    def test_answers_from_reveal_picks_too_smart_by_points(self, cog):
+        reveal = self._reveal()
+        reveal["prompts"][3]["answers"].append({"answer": "Clever", "score": 15})
+        too_smart = cog._answers_from_reveal(reveal, 15)
+        assert too_smart[3] == ["Clever"]
+        assert too_smart[0] == []
 
     @pytest.mark.parametrize(
         "reveal",
         [None, {}, {"prompts": []}, {"prompts": [{"answers": []}] * 6}],
     )
     def test_shrimp_from_reveal_rejects_bad_shapes(self, cog, reveal):
-        assert cog._shrimp_from_reveal(reveal) is None
+        assert cog._answers_from_reveal(reveal) is None
 
     @pytest.mark.parametrize(
         "today",
@@ -298,6 +385,114 @@ class TestPromptArchive:
     async def test_junk_today_payloads_are_rejected(self, cog, db, today):
         assert await cog._store_today(today, self._reveal()) is False
         assert await db.get_puzzle_info("krillion") == {}
+
+
+class TestArchiveBackfill:
+    @pytest.fixture
+    def cog(self, db, monkeypatch):
+        monkeypatch.setattr("cogs.krillion.ARCHIVE_DELAY", 0)
+        monkeypatch.setenv("KRILLION_UNLOCK_TOKEN", "cs_live_x.sig")
+        return Krillion(
+            SimpleNamespace(database=db, logger=logging.getLogger("test"))
+        )
+
+    @staticmethod
+    def _archive(day):
+        """The archive's day and reveal payloads for ``day``."""
+        meta = {
+            "game": day,
+            "date": f"2026-07-{day:02d}",
+            "prompts": [{"id": f"p{i}", "text": f"D{day} Q{i}"} for i in range(1, 8)],
+        }
+        # Rounds come back keyed by prompt id, deliberately out of order.
+        sheet = {
+            "rounds": [
+                {
+                    "round": f"p{i}",
+                    "text": f"D{day} Q{i}",
+                    "answers": [
+                        {"answer": f"Shrimp{i}", "score": 100},
+                        {"answer": f"Clever{i}", "score": 15},
+                    ],
+                }
+                for i in reversed(range(1, 8))
+            ]
+        }
+        return meta, sheet
+
+    @pytest.fixture
+    def fetched(self, cog):
+        """Serve fake archive responses; records each (url, headers) asked for."""
+        calls = []
+        fail_days: set[int] = set()
+
+        async def fake_get_json(session, url, headers=None):
+            calls.append((url, headers))
+            day = int(url.split("/api/archive/")[1].split("/")[0])
+            if day in fail_days:
+                return None
+            meta, sheet = self._archive(day)
+            return sheet if url.endswith("/reveal") else meta
+
+        cog._get_json = fake_get_json
+        return SimpleNamespace(calls=calls, fail_days=fail_days)
+
+    async def test_fills_missing_and_incomplete_days_only(self, cog, db, fetched):
+        complete = {"prompts": ["x"] * 7, "shrimp": [[]] * 7, "too_smart": [[]] * 7}
+        await db.set_puzzle_info("krillion", 1, complete)
+        # Day 2 was stored without its answer sheet (reveal fetch failed).
+        await db.set_puzzle_info("krillion", 2, {"prompts": ["x"] * 7})
+        # Day 4 is "today": not in the archive yet, so never asked for.
+        await cog._backfill_missing(None, 4)
+
+        stored = await db.get_puzzle_info("krillion")
+        assert stored[1] == complete
+        assert sorted(stored) == [1, 2, 3]
+        assert stored[3]["date"] == "2026-07-03"
+        assert stored[3]["prompts"] == [f"D3 Q{i}" for i in range(1, 8)]
+        # Rounds are matched back to prompts by id, not by position.
+        assert stored[3]["shrimp"] == [[f"Shrimp{i}"] for i in range(1, 8)]
+        assert stored[3]["too_smart"] == [[f"Clever{i}"] for i in range(1, 8)]
+        assert stored[2]["shrimp"][0] == ["Shrimp1"]
+        asked = [url for url, _ in fetched.calls]
+        assert asked == [
+            "https://krillion.io/api/archive/2",
+            "https://krillion.io/api/archive/2/reveal",
+            "https://krillion.io/api/archive/3",
+            "https://krillion.io/api/archive/3/reveal",
+        ]
+        assert all(h == {"x-krillion-unlock": "cs_live_x.sig"} for _, h in fetched.calls)
+
+    async def test_no_token_means_no_requests(self, cog, db, fetched, monkeypatch):
+        monkeypatch.delenv("KRILLION_UNLOCK_TOKEN")
+        await cog._backfill_missing(None, 4)
+        assert fetched.calls == []
+        assert await db.get_puzzle_info("krillion") == {}
+
+    async def test_failure_stops_and_keeps_earlier_days(self, cog, db, fetched):
+        fetched.fail_days.add(2)
+        await cog._backfill_missing(None, 4)
+        stored = await db.get_puzzle_info("krillion")
+        # Day 1 filled; day 2 failed so the run stopped before day 3.
+        assert sorted(stored) == [1]
+        assert not any("/archive/3" in url for url, _ in fetched.calls)
+
+    @pytest.mark.parametrize(
+        "meta, sheet",
+        [
+            (None, None),
+            ({"game": 5}, {"rounds": []}),  # no prompts
+        ],
+    )
+    def test_from_archive_rejects_unusable_days(self, cog, meta, sheet):
+        assert cog._from_archive(meta, sheet) == (None, None)
+
+    def test_from_archive_without_matching_rounds_has_no_reveal(self, cog):
+        meta, sheet = self._archive(5)
+        sheet["rounds"] = sheet["rounds"][1:]  # one prompt's round missing
+        today, reveal = cog._from_archive(meta, sheet)
+        assert today["dayNumber"] == 5
+        assert reveal is None
 
 
 class TestBuilder:
@@ -412,6 +607,63 @@ class TestBuilder:
         assert "• Q7 — avg 80 pts (#47) — 🌟 A7" in text
         assert "• Q1 — avg 85 pts (#47)" in text
         assert "🌟 A1" not in text
+
+    async def test_worst_questions_name_too_smart_answer_someone_got(
+        self, db, channel
+    ):
+        cog = Krillion(SimpleNamespace(database=db))
+        # alice gets the too smart answer on Q2; nobody gets one on Q5.
+        await db.upsert_leaderboard_result(
+            "krillion", 100, 1, 42, "alice", date(2026, 9, 4),
+            {"puzzle": 51, "score": 400, "answers": [60, 15, 60, 60, 60, 60, 85]},
+        )
+        await db.upsert_leaderboard_result(
+            "krillion", 100, 2, 43, "bob", date(2026, 9, 4),
+            {"puzzle": 51, "score": 285, "answers": [60, 10, 60, 60, 10, 0, 85]},
+        )
+        too_smart = [[] for _ in range(7)]
+        too_smart[1] = ["Human"]
+        too_smart[4] = ["Unclaimed"]
+        await db.set_puzzle_info(
+            "krillion",
+            51,
+            {
+                "prompts": [f"Q{i}" for i in range(1, 8)],
+                "shrimp": [[f"A{i}"] for i in range(1, 8)],
+                "too_smart": too_smart,
+            },
+        )
+        embed = await cog.build_leaderboard(channel, (2026, 9), "September 2026")
+        fields = {field.name: field.value for field in embed.fields}
+        # Slot averages: 60, 12.5, 60, 60, 35, 30, 85.
+        worst = fields["😰 Worst questions (group average)"].splitlines()
+        assert worst == [
+            "• Q2 — avg 12 pts (#51) — 🤡 Human",
+            "• Q6 — avg 30 pts (#51)",
+            "• Q5 — avg 35 pts (#51)",
+        ]
+        assert "Unclaimed" not in "\n".join(fields.values())
+
+    async def test_best_questions_omit_too_smart_answer(self, db, channel):
+        cog = Krillion(SimpleNamespace(database=db))
+        # Everyone's too smart answer on Q1 is still the best average here.
+        for mid, uid in enumerate((42, 43), start=1):
+            await db.upsert_leaderboard_result(
+                "krillion", 100, mid, uid, f"p{uid}", date(2026, 9, 4),
+                {"puzzle": 51, "score": 15, "answers": [15, 0, 0, 0, 0, 0, 0]},
+            )
+        too_smart = [[] for _ in range(7)]
+        too_smart[0] = ["Human"]
+        await db.set_puzzle_info(
+            "krillion",
+            51,
+            {"prompts": [f"Q{i}" for i in range(1, 8)], "too_smart": too_smart},
+        )
+        embed = await cog.build_leaderboard(channel, (2026, 9), "September 2026")
+        fields = {field.name: field.value for field in embed.fields}
+        assert fields["💪 Best questions (group average)"].splitlines()[0] == (
+            "• Q1 — avg 15 pts (#51)"
+        )
 
     async def test_no_question_fields_without_two_grids(self, db, channel):
         cog = Krillion(SimpleNamespace(database=db))

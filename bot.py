@@ -182,7 +182,7 @@ class DiscordBot(commands.Bot):
             "🐟🐟🐟🐟🐟 hehe fish",
             "🥚 close enough counts",
             "reading Wikipedia categories for fun",
-            '"1987 births" — narrow it down??',
+            '"1987 births"',
             "10/10 cats or I log off",
             "one cat. ONE. 🐈",
             "avec l'cooby :3",
