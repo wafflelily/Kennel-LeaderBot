@@ -15,30 +15,94 @@ from discord import app_commands
 from discord.ext import commands
 from discord.ext.commands import Context
 
-from leaderboard.base import LeaderboardCog, game_choices
+from leaderboard.base import LeaderboardCog, Trimmable, game_choices
+
+# Discord's embed limits: characters per field value, and in total across the
+# title, description, field names/values and footer.
+FIELD_LIMIT = 1024
+EMBED_LIMIT = 6000
 
 
-def split_fields(name: str, lines: list[str]) -> list[tuple[str, str]]:
+def split_fields(name: str, lines: list) -> list[tuple[str, list[str], list[str]]]:
     """
-    Split one game's stat lines into ``(field name, field value)`` pairs.
+    Split one game's stat lines into ``(field name, lines, trimmable lines)``.
 
     Discord doesn't render markdown headers inside embeds, so a cog marks a
     sub-header by starting a line with ``### ``; each becomes its own field
     name (which Discord styles like the game's own title), with the following
-    lines as that field's value.
+    lines as that field's value. A ``Trimmable`` element's lines go in the
+    third slot, which ``fit_fields`` may shorten; they display after the
+    field's ordinary lines.
     """
-    fields: list[tuple[str, str]] = []
-    current_name, chunk = name, []
+    fields: list[tuple[str, list[str], list[str]]] = []
+    current_name, chunk, trimmable = name, [], []
     for line in lines:
-        if line.startswith("### "):
-            if chunk:
-                fields.append((current_name, "\n".join(chunk)))
-            current_name, chunk = line[4:], []
+        if isinstance(line, Trimmable):
+            trimmable += line
+        elif line.startswith("### "):
+            if chunk or trimmable:
+                fields.append((current_name, chunk, trimmable))
+            current_name, chunk, trimmable = line[4:], [], []
         else:
             chunk.append(line)
-    if chunk:
-        fields.append((current_name, "\n".join(chunk)))
+    if chunk or trimmable:
+        fields.append((current_name, chunk, trimmable))
     return fields
+
+
+def _join(lines: list[str]) -> str:
+    return "\n".join(lines)
+
+
+def _trim(fixed: list[str], extra: list[str], limit: int) -> list[str]:
+    """
+    ``fixed`` plus as many of ``extra`` as fit in ``limit`` characters,
+    ending with a "+N more" line for whatever was left out.
+    """
+    if len(_join(fixed + extra)) <= limit:
+        return fixed + extra
+    for keep in range(len(extra) - 1, -1, -1):
+        lines = fixed + extra[:keep] + [f"+{len(extra) - keep} more"]
+        if len(_join(lines)) <= limit:
+            return lines
+    return fixed + [f"+{len(extra)} more"]
+
+
+def fit_fields(
+    fields: list[tuple[str, list[str], list[str]]], used: int = 0
+) -> list[tuple[str, str]]:
+    """
+    Turn ``split_fields`` output into ``(name, value)`` pairs that fit
+    Discord's limits, shortening only the trimmable lists.
+
+    ``used`` is what the rest of the embed (title, description, ...) already
+    takes. The space left after every untrimmable part is shared between the
+    trimmable lists smallest first: each gets an even share of what's left or
+    its full size if that's less, and anything a short list doesn't need goes
+    to the longer ones. So a short list stays whole while a long one is cut.
+    """
+    budget = EMBED_LIMIT - used
+    for name, fixed, extra in fields:
+        budget -= len(name)
+        if not extra:
+            budget -= len(_join(fixed))
+
+    # Each trimmable field's allowance: its whole value, within the field limit.
+    allowance: dict[int, int] = {}
+    wanted = sorted(
+        (len(_join(fixed + extra)), i)
+        for i, (_, fixed, extra) in enumerate(fields)
+        if extra
+    )
+    for n, (size, i) in enumerate(wanted):
+        share = max(budget, 0) // (len(wanted) - n)
+        allowance[i] = min(size, share, FIELD_LIMIT)
+        budget -= len(_join(_trim(fields[i][1], fields[i][2], allowance[i])))
+
+    return [
+        (name, _join(_trim(fixed, extra, allowance[i]) if extra else fixed))
+        for i, (name, fixed, extra) in enumerate(fields)
+    ]
 
 
 class Stats(commands.Cog, name="stats"):
@@ -123,9 +187,14 @@ class Stats(commands.Cog, name="stats"):
             description="Compared against everything tallied in this channel.",
             color=0xBEBEFE,
         )
-        for field_name, lines in fields:
-            for sub_name, value in split_fields(field_name, lines):
-                embed.add_field(name=sub_name, value=value, inline=False)
+        split = [
+            sub
+            for field_name, lines in fields
+            for sub in split_fields(field_name, lines)
+        ]
+        # Long lists (e.g. Krillion catches) are shortened to fit the embed.
+        for sub_name, value in fit_fields(split, used=len(embed)):
+            embed.add_field(name=sub_name, value=value, inline=False)
         await context.send(embed=embed)
 
     @mystats.autocomplete("game")

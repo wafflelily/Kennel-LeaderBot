@@ -54,6 +54,15 @@ MONTHS = {
 }
 
 
+class Trimmable(list):
+    """
+    A run of list lines in ``compare_stats`` output that /mystats may cut
+    short, ending it with "+N more", to keep its embed within Discord's
+    character limits. Put one in the lines list as a single element (usually
+    right after a ``### `` sub-header); everything else is never trimmed.
+    """
+
+
 def game_choices(games, current: str) -> list[app_commands.Choice[str]]:
     """Autocomplete choices for a ``game`` argument from the loaded game names."""
     current = current.strip().lower()

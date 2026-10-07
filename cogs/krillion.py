@@ -48,7 +48,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from discord.ext.commands import Context
 
-from leaderboard.base import LeaderboardCog, month_choices
+from leaderboard.base import LeaderboardCog, Trimmable, month_choices
 
 # Answer symbol -> points. ⬛ means "no submission".
 VALUES = {"⬛": 0, "🫧": 10, "🤡": 15, "🐟": 30, "🦑": 60, "🏮": 85, "🌟": 100}
@@ -717,10 +717,9 @@ class Krillion(LeaderboardCog, name="krillion"):
                     )
                     caught.append(f"• {_short(texts[slot])}{named} (#{puzzle})")
             if caught:
+                # /mystats shortens these lists if the embed would get too long.
                 lines.append(f"### {title} {symbol}")
-                lines += caught[:8]
-                if len(caught) > 8:
-                    lines.append(f"…and {len(caught) - 8} more")
+                lines.append(Trimmable(caught))
         return lines
 
 

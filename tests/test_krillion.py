@@ -209,7 +209,7 @@ class TestCompareStats:
         lines = await cog.compare_stats(rows, P1)
         assert "### Shrimp catches 🌟" not in lines
         catches_at = lines.index("### Too smart catches 🤡")
-        assert lines[catches_at + 1 :] == ["• Q2 → **Human** (#51)"]
+        assert lines[catches_at + 1] == ["• Q2 → **Human** (#51)"]
 
     async def test_no_too_smart_section_without_a_catch(self, cog, db, rows):
         await db.set_puzzle_info(
@@ -239,7 +239,7 @@ class TestCompareStats:
         catches_at = lines.index("### Shrimp catches 🌟")
         # P1's day-46 grid has shrimps in slots 0 and 6 → answers A1 and A7;
         # day 47 isn't archived, so its shrimp-free grid adds nothing.
-        assert lines[catches_at + 1 :] == [
+        assert lines[catches_at + 1] == [
             "• Q1 → **A1** (#46)",
             "• Q7 → **A7** (#46)",
         ]
@@ -252,7 +252,7 @@ class TestCompareStats:
         )
         lines = await cog.compare_stats(rows, P1)
         catches_at = lines.index("### Shrimp catches 🌟")
-        assert lines[catches_at + 1 :] == [
+        assert lines[catches_at + 1] == [
             "• Q1 → **A1a / A1b** (#46)",
             "• Q7 → **A7** (#46)",
         ]
@@ -268,7 +268,7 @@ class TestCompareStats:
         )
         lines = await cog.compare_stats(rows, P1)
         catches_at = lines.index("### Shrimp catches 🌟")
-        assert lines[catches_at + 1 :] == ["• Q1 → **A1** (#46)", "• Q7 → **A7** (#46)"]
+        assert lines[catches_at + 1] == ["• Q1 → **A1** (#46)", "• Q7 → **A7** (#46)"]
 
     async def test_shrimp_catches_without_answer_data_omit_the_arrow(self, cog, db, rows):
         # Prompts archived but no shrimp answers (older-format archive).
@@ -277,7 +277,7 @@ class TestCompareStats:
         )
         lines = await cog.compare_stats(rows, P1)
         catches_at = lines.index("### Shrimp catches 🌟")
-        assert lines[catches_at + 1 :] == ["• Q1 (#46)", "• Q7 (#46)"]
+        assert lines[catches_at + 1] == ["• Q1 (#46)", "• Q7 (#46)"]
 
     async def test_no_shrimp_section_without_archived_prompts(self, cog, rows):
         lines = await cog.compare_stats(rows, P1)
