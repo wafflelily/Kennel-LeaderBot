@@ -110,6 +110,24 @@ def _effective(info) -> float:
     return info
 
 
+def _loading(payload) -> float | None:
+    """
+    A run's loading time: the part of the total not spent in any game.
+
+    Gauntle shows it in its UI but not in the shared text, so it's worked out
+    as the total minus the sum of the effective category times. Only known
+    for a complete run (all ``CATEGORIES_PER_RUN`` games); None otherwise, or
+    if the numbers don't add up (a negative difference).
+    """
+    categories = payload.get("categories", {})
+    if len(categories) != CATEGORIES_PER_RUN:
+        return None
+    loading = round(
+        payload["total"] - sum(_effective(info) for info in categories.values()), 2
+    )
+    return loading if loading >= 0 else None
+
+
 def _fmt_solve(raw: float | None, adj: float | None) -> str:
     """
     Format a raw solve time with its adjustment, e.g. ``0:50.58 (−10s)``.
@@ -313,6 +331,16 @@ class Gauntle(LeaderboardCog, name="gauntle"):
             return None
 
         team = sum(effective for effective, _ in best.values())
+        # Every real run includes loading time, so add the day's lowest one to
+        # keep the team time comparable with the solo totals.
+        loadings = [
+            loading
+            for row in rows
+            if (loading := _loading(row["payload"])) is not None
+        ]
+        loading = min(loadings) if loadings else None
+        if loading is not None:
+            team += loading
         # How much faster the team is than the day's fastest solo run.
         saved = min(row["payload"]["total"] for row in rows) - team
 
@@ -320,6 +348,8 @@ class Gauntle(LeaderboardCog, name="gauntle"):
         if saved > 0:
             header += f" — teamwork saved {_fmt_time(saved)}"
         lines = [header]
+        if loading is not None:
+            lines.append(f"⏳ incl. {_fmt_time(loading)} loading time")
         # Who held the best time in how many games, most first (ties by name).
         held = Counter(author_id for _, author_id in best.values())
         ranked = sorted(held.items(), key=lambda item: (-item[1], names[item[0]].lower()))
@@ -583,6 +613,15 @@ class Gauntle(LeaderboardCog, name="gauntle"):
                     name not in my_best or effective < my_best[name]
                 ):
                     my_best[name] = effective
+        # Loading time (total minus game times) is tracked like a category,
+        # but listed separately rather than as a game, and without a crown.
+        my_loadings = [
+            loading
+            for row in rows
+            if row["author_id"] == author_id
+            and (loading := _loading(row["payload"])) is not None
+        ]
+        my_loading = min(my_loadings) if my_loadings else None
 
         lines = [
             f"Days run: **{len(mine)}**",
@@ -612,14 +651,16 @@ class Gauntle(LeaderboardCog, name="gauntle"):
         if current:
             lines.append("### Personal category bests (👑 = channel record)")
             lines.extend(best_line(name) for name in current)
-            # A "dream run": the sum of every current game's personal best, as
-            # if all their best category times had landed in one run. Only
+            if my_loading is not None:
+                lines.append(f"⏳ Loading time: {_fmt_time(my_loading)}")
+            # A "dream run": the sum of every current game's personal best plus
+            # their best loading time, as if it had all landed in one run. Only
             # meaningful once they've a time for every game in the lineup.
             missing = sorted(lineup - my_best.keys())
             if missing:
                 lines.append(f"Sum of bests: needs a time for {', '.join(missing)}")
             else:
-                total = sum(my_best[name] for name in current)
+                total = sum(my_best[name] for name in current) + (my_loading or 0)
                 lines.append(f"**Sum of bests: {_fmt_time(total)}**")
         if retired:
             lines.append("### Retired category bests")

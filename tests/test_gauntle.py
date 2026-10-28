@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from cogs.gauntle import Gauntle, _fmt_solve, _fmt_time
+from cogs.gauntle import Gauntle, _fmt_solve, _fmt_time, _loading
 
 SAMPLE = """I ran the August 20th Gauntlet in 15 minutes and 51.34 seconds!
 
@@ -140,6 +140,26 @@ class TestParse:
     def test_header_without_duration_is_not_a_result(self, cog):
         message = "I ran the June 5th Gauntlet and it was brutal!"
         assert cog.parse(message, date(2026, 6, 5)) is None
+
+
+class TestLoadingTime:
+    def test_loading_is_total_minus_effective_game_times(self, cog):
+        _, payload = cog.parse(NEW_LINEUP_SAMPLE, date(2026, 10, 7))
+        # 5:59.80 total; games sum to 421.90 raw − 98 adjustments = 323.90.
+        assert _loading(payload) == pytest.approx(35.90)
+
+    def test_untrimmed_link_doesnt_change_it(self, cog):
+        text = NEW_LINEUP_SAMPLE + "\nRun it yourself at https://gauntle.com/"
+        _, payload = cog.parse(text, date(2026, 10, 7))
+        assert _loading(payload) == pytest.approx(35.90)
+
+    def test_incomplete_run_has_no_loading_time(self):
+        payload = {"total": 100.0, "categories": {"Sudoku": {"raw": 50.0, "adj": 0.0}}}
+        assert _loading(payload) is None
+
+    def test_negative_difference_is_ignored(self):
+        categories = {f"G{i}": {"raw": 10.0, "adj": 0.0} for i in range(11)}
+        assert _loading({"total": 100.0, "categories": categories}) is None
 
 
 class TestYearInference:
@@ -318,6 +338,22 @@ class TestTeamScore:
             "🤝 **Team Gauntle for Aug 05: 2:25.00** — teamwork saved 2:35.00\n"
             "p1 ×1 · p2 ×1"
         )
+
+    async def test_adds_the_lowest_loading_time(self, cog):
+        def full_run(game_seconds):
+            # All 11 games; the 5:00 total leaves the rest as loading time.
+            games = (f"G{i}: 0:{game_seconds:05.2f}" for i in range(11))
+            return run_text(5, 5, "\n".join(games))
+
+        await self.post(cog, 1, 1, full_run(24.0))  # 264s of games -> 36s loading
+        await self.post(cog, 2, 2, full_run(25.0))  # 275s of games -> 25s loading
+        text = await cog.build_team_score(self.CHANNEL, date(2026, 8, 5))
+        # Best games are p1's 24s each (264s) plus the lowest loading, 25s.
+        assert text.splitlines() == [
+            "🤝 **Team Gauntle for Aug 05: 4:49.00** — teamwork saved 11.00s",
+            "⏳ incl. 25.00s loading time",
+            "p1 ×11",
+        ]
 
     async def test_only_counts_that_days_runs(self, cog):
         await self.post(cog, 1, 1, run_text(5, 5, "Sudoku: 1:00.00"))

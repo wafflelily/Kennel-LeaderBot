@@ -128,6 +128,29 @@ class TestGauntleCompare:
         assert "Sum of bests: needs a time for Conduit" in lines
         assert not any(line.startswith("**Sum of bests") for line in lines)
 
+    async def test_loading_time_is_listed_and_added_to_sum_of_bests(self, cog):
+        def full_run(total, game_seconds):
+            categories = {f"G{i:02}": {"raw": game_seconds, "adj": 0.0} for i in range(11)}
+            return {"total": total, "categories": categories}
+
+        rows = [
+            # P1: 11 x 20s games; loading 40s, then 30s on the faster day.
+            row(P1, date(2026, 10, 1), full_run(260.0, 20.0)),
+            row(P1, date(2026, 10, 2), full_run(250.0, 20.0)),
+            # P2 holds the channel's lowest loading time, 25s.
+            row(P2, date(2026, 10, 2), full_run(355.0, 30.0)),
+        ]
+        lines = await cog.compare_stats(rows, P1)
+        assert "⏳ Loading time: 30.00s" in lines
+        # 11 x 20s games + 30s loading.
+        assert "**Sum of bests: 4:10.00**" in lines
+        # Listed after the games, separately from them.
+        assert lines.index("⏳ Loading time: 30.00s") == lines.index("• G10: 20.00s 👑") + 1
+
+        # Never crowned, even for the channel's lowest loading time.
+        p2_lines = await cog.compare_stats(rows, P2)
+        assert "⏳ Loading time: 25.00s" in p2_lines
+
     async def test_unknown_player_returns_none(self, cog, rows):
         assert await cog.compare_stats(rows, 999) is None
 
