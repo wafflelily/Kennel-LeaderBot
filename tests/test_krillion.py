@@ -82,6 +82,20 @@ class TestParse:
         _, payload = cog.parse("#47\n\n265", POSTED)
         assert payload["score"] == 265
 
+    def test_archive_replay_counts_like_a_regular_share(self, cog):
+        message = "Krillion ⟲ #99 🦐\n345\n\n🫧🦑⬛🦑🌟🏮🐟"
+        played_on, payload = cog.parse(message, POSTED)
+        assert played_on == POSTED
+        assert payload == {
+            "puzzle": 99,
+            "score": 345,
+            "answers": [10, 60, 0, 60, 100, 85, 30],
+        }
+
+    def test_archive_replay_without_grid_uses_stated_score(self, cog):
+        _, payload = cog.parse("Krillion ⟲ #99 🦐\n345", POSTED)
+        assert payload == {"puzzle": 99, "score": 345, "answers": None}
+
     def test_pack_results_are_ignored(self, cog):
         assert cog.parse(PACK_SHARE, POSTED) is None
 

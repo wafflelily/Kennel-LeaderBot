@@ -18,9 +18,10 @@ or the bare form, just the day number and score:
     #47
     265
 
-Pack results are NOT counted: an emoji between the name and the number
-("Krillion 🎬 #1 🦐") marks a pack rather than the daily game, and those don't
-match the daily patterns.
+Archive replays ("Krillion ⟲ #99 🦐") are a past daily game played again, and
+count just like a regular share. Pack results are NOT counted: any other emoji
+between the name and the number ("Krillion 🎬 #1 🦐") marks a pack rather than
+the daily game, and those don't match the daily patterns.
 
 Each grid symbol is one prompt's answer quality:
 ⬛ no submission (0) · 🫧 bubbles (10) · 🤡 too smart (15) · 🐟 fish (30) ·
@@ -61,10 +62,11 @@ SHRIMP, LANTERN, SQUID = "🌟", "🏮", "🦑"
 # The rare "too smart" (smartass) answer.
 TOO_SMART = "🤡"
 
-# Matches the daily header, e.g. "Krillion #47 🦐". Only whitespace may sit
-# between the name and the number: pack results put the pack's emoji there
-# ("Krillion 🎬 #1 🦐"), and packs aren't the daily game.
-HEADER_RE = re.compile(r"\bkrillion\s*#(\d+)", re.IGNORECASE)
+# Matches the daily header, e.g. "Krillion #47 🦐", or an archive replay of a
+# past day, "Krillion ⟲ #99 🦐". Nothing else may sit between the name and the
+# number: pack results put the pack's emoji there ("Krillion 🎬 #1 🦐"), and
+# packs aren't the daily game.
+HEADER_RE = re.compile(r"\bkrillion\s*(?:⟲️?\s*)?#(\d+)", re.IGNORECASE)
 
 # The bare form: the whole message is just "#day" then the score.
 BARE_RE = re.compile(r"#(\d+)\s+(\d+)")
