@@ -98,6 +98,29 @@ class TestParse:
         _, payload = cog.parse(message, POSTED)
         assert payload["score"] == 4.0
 
+    def test_halloween_grid(self, cog):
+        # 👻 = cat, ⚰️ = fish; the wrong-answer list underneath is ignored.
+        message = (
+            "catfishing.net\n"
+            "#860 - 8/10 🎉\n"
+            "👻👻⚰️👻⚰️\n"
+            "👻👻👻👻👻\n"
+            "\n"
+            "Q5 ⚰️ duncan\n"
+            "Skipped Q3"
+        )
+        _, payload = cog.parse(message, POSTED)
+        assert payload == {
+            "puzzle": 860,
+            "score": 8.0,
+            "correct": [0, 1, 3, 5, 6, 7, 8, 9],
+        }
+
+    def test_halloween_grid_without_variation_selectors(self, cog):
+        message = "catfishing.net\n#860 - 8/10\n👻👻⚰👻⚰\n👻👻👻👻👻"
+        _, payload = cog.parse(message, POSTED)
+        assert payload["correct"] == [0, 1, 3, 5, 6, 7, 8, 9]
+
     def test_ordinary_chat(self, cog):
         assert cog.parse("I scored 4 out of 10 today", POSTED) is None
 

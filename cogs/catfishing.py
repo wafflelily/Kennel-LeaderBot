@@ -63,13 +63,26 @@ EGG = "🥚"
 SYMBOLS = (CAT, FISH, EGG)
 QUESTIONS = 10
 
+# On some holidays catfishing.net swaps the grid emoji for themed ones. Each
+# entry maps a themed emoji to the normal symbol it stands for; add a line per
+# emoji when a new theme turns up. Leave off the emoji variation selector
+# (U+FE0F, the invisible part of e.g. "⚰️"), which is stripped before lookup.
+HOLIDAY_SYMBOLS = {
+    # Halloween: 👻 for a correct answer, ⚰️ for a wrong one.
+    "👻": CAT,
+    "⚰": FISH,
+}
+# Every grid emoji, normal or themed, mapped to its normal symbol.
+GRID_SYMBOLS = {**{symbol: symbol for symbol in SYMBOLS}, **HOLIDAY_SYMBOLS}
+
 # Matches the puzzle/score line, e.g. "#725 - 4/10" or "694 - 3.5/10".
 # Group 1 is the puzzle number, group 2 is the stated score.
 SCORE_RE = re.compile(r"#?(\d+)\s*-\s*(\d+(?:\.\d+)?)\s*/\s*10\b")
 
 # Per-puzzle stats endpoint. The `day` query param is the puzzle number shown
-# in the shared result (e.g. "#714" -> day=714).
-API_URL = "https://catfishing.net/api/game?day={day}"
+# in the shared result (e.g. "#714" -> day=714). It moved from /api/game to
+# /app/game in November 2026 (the old path now 404s); same JSON shape.
+API_URL = "https://catfishing.net/app/game?day={day}"
 
 # Puzzle stats are stored in the database (``puzzle_info``) so a restart
 # doesn't mean re-fetching them all. The global solve rates keep moving while
@@ -307,8 +320,8 @@ class Catfishing(LeaderboardCog, name="catfishing"):
         """
         Find the result grid in a message and score it.
 
-        Handles the emoji grid (🐈/🐟/🥚) and the text grid (C=cat, F=fish,
-        E=egg), e.g.::
+        Handles the emoji grid (🐈/🐟/🥚, or a holiday theme's emoji from
+        ``HOLIDAY_SYMBOLS``) and the text grid (C=cat, F=fish, E=egg), e.g.::
 
             FFFFC
             CCFFC
@@ -323,8 +336,8 @@ class Catfishing(LeaderboardCog, name="catfishing"):
         symbols = []
         for line in content.splitlines():
             stripped = line.replace("|", "").replace("️", "").strip()
-            if stripped and all(ch in SYMBOLS or ch.isspace() for ch in stripped):
-                symbols += [ch for ch in stripped if ch in SYMBOLS]
+            if stripped and all(ch in GRID_SYMBOLS or ch.isspace() for ch in stripped):
+                symbols += [GRID_SYMBOLS[ch] for ch in stripped if ch in GRID_SYMBOLS]
         if len(symbols) == QUESTIONS:
             return cls._score_grid(symbols, CAT, EGG)
 
