@@ -28,6 +28,21 @@ class TestLeaderboardResults:
         )
         assert rows[0]["payload"] == payload
 
+    async def test_channel_games_are_recent_and_per_channel(self, db):
+        await db.upsert_leaderboard_result(
+            "gauntle", 100, 1, 42, "alice", date(2026, 10, 5), {"n": 1}
+        )
+        await db.upsert_leaderboard_result(
+            "gauntle", 100, 2, 42, "alice", date(2026, 11, 5), {"n": 2}
+        )
+        await db.upsert_leaderboard_result(
+            "catfishing", 100, 3, 42, "alice", date(2026, 6, 5), {"n": 3}
+        )
+        await db.upsert_leaderboard_result(
+            "foodguessr", 200, 4, 42, "alice", date(2026, 11, 5), {"n": 4}
+        )
+        assert await db.get_channel_games(100, "2026-10-01") == ["gauntle"]
+
     async def test_upsert_same_message_updates_instead_of_duplicating(self, db):
         await db.upsert_leaderboard_result(
             "gauntle", 100, 1, 42, "alice", date(2026, 8, 5), {"total": 100}

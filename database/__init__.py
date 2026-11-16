@@ -91,6 +91,20 @@ class DatabaseManager:
             for row in result
         ]
 
+    async def get_channel_games(self, channel_id: int, since_iso: str) -> list[str]:
+        """
+        Return the games with cached results in a channel played on or after
+        ``since_iso`` (an ISO date string).
+        """
+        rows = await self.connection.execute(
+            "SELECT DISTINCT game FROM leaderboard_results "
+            "WHERE channel_id=? AND played_on >= ?",
+            (str(channel_id), since_iso),
+        )
+        async with rows as cursor:
+            result = await cursor.fetchall()
+        return [row[0] for row in result]
+
     async def clear_leaderboard_game(self, game: str) -> int:
         """
         Drop all cached results and scan state for a game.

@@ -50,13 +50,26 @@ class AutoPost(commands.Cog, name="autopost"):
             if isinstance(cog, LeaderboardCog) and hasattr(cog, "build_leaderboard")
         }
 
+    async def _relevant_games(self, channel_id: int, games) -> list[str]:
+        """
+        The games currently played in a channel: those with cached results
+        played since the start of last month, i.e. ones whose next monthly
+        post would have something on it.
+        """
+        today = dt.date.today()
+        last_month = (today.replace(day=1) - dt.timedelta(days=1)).replace(day=1)
+        played = await self.bot.database.get_channel_games(
+            channel_id, last_month.isoformat()
+        )
+        return sorted(g for g in played if g in games)
+
     @commands.hybrid_command(
         name="autopost",
         description="Post the final leaderboard here automatically on the 1st of each month.",
     )
     @app_commands.describe(
         state="`on` or `off`, or `status` to see this channel's current opt-ins.",
-        game="Which leaderboard, e.g. `gauntle`. Omit for all of them.",
+        game="Which leaderboard, e.g. `gauntle`. Omit for every game played in this channel.",
     )
     @app_commands.choices(
         state=[
@@ -73,7 +86,8 @@ class AutoPost(commands.Cog, name="autopost"):
 
         :param context: The hybrid command context.
         :param state: "on", "off", or "status".
-        :param game: Optional game to change; if omitted, every leaderboard.
+        :param game: Optional game to change; if omitted, "on" covers the games
+            recently played in this channel and "off" every game that's on.
         """
         games = self._games()
         state = state.strip().lower()
@@ -117,8 +131,36 @@ class AutoPost(commands.Cog, name="autopost"):
                 )
                 return
             targets = [game]
+        elif state == "on":
+            targets = await self._relevant_games(context.channel.id, games)
+            if not targets:
+                await context.send(
+                    embed=discord.Embed(
+                        title="Error!",
+                        description=(
+                            "No leaderboard results have been posted in this channel "
+                            "recently. Run a leaderboard command (e.g. `/gauntle`) here "
+                            "first, or pick a `game` explicitly."
+                        ),
+                        color=0xE02B2B,
+                    )
+                )
+                return
         else:
-            targets = sorted(games)
+            # Only mention the games that were actually on here.
+            targets = sorted(
+                g
+                for g in await self.bot.database.get_autopost_games(context.channel.id)
+                if g in games
+            )
+            if not targets:
+                await context.send(
+                    embed=discord.Embed(
+                        description="This channel has no automatic monthly posts.",
+                        color=0xBEBEFE,
+                    )
+                )
+                return
 
         for name in targets:
             await self.bot.database.set_autopost(
