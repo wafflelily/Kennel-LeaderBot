@@ -38,6 +38,23 @@ NEW_LINEUP_SAMPLE = """I ran the October 7th Gauntle(t) in 5 minutes and 59.80 s
 🟩 Ratiole: 0:04.87 (−19s) ✨
 """
 
+# Hard mode: modified puzzles with different bonuses/penalties; not tracked.
+HARD_MODE_SAMPLE = """[HARD MODE] [WEEK 21]
+I ran the November 15th Gauntle(t) in 13 minutes and 28.01 seconds!
+
+🟩 Paire: 1:00.71 (−55s) ✨
+🟩 Mines: 2:11.44 (−60s) ✨
+🟩 Ratiole: 0:10.94 (−29s) ✨
+🟩 Nonogram: 2:46.61 (−75s) ✨
+🟩 Conduit: 0:13.17 (−30s) ✨
+🟩 Sudoku: 7:40.33 (−75s) ✨
+🟩 Wordy: 0:20.28 (−25s) ✨
+🟨 Angle: 0:34.61 (+5s)
+🟩 Queens: 2:17.29 (−30s) ✨
+🟩 Crossword: 1:35.77 (−85s) ✨
+🟨 Clambers: 1:26.01 (+15s)
+"""
+
 
 @pytest.fixture
 def cog():
@@ -129,6 +146,17 @@ class TestParse:
         _, payload = cog.parse(message, date(2026, 6, 5))
         assert len(payload["categories"]) == 11
         assert "CatL" not in payload["categories"]
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            HARD_MODE_SAMPLE,
+            HARD_MODE_SAMPLE.replace("[HARD MODE]", r"\[HARD MODE\]"),
+            HARD_MODE_SAMPLE.replace("[HARD MODE]", "[Hard Mode]"),
+        ],
+    )
+    def test_hard_mode_is_ignored(self, cog, message):
+        assert cog.parse(message, date(2026, 11, 15)) is None
 
     def test_ordinary_chat_is_not_a_result(self, cog):
         assert cog.parse("gg everyone, nice runs today", date(2026, 6, 5)) is None

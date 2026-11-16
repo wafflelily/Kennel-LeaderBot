@@ -61,6 +61,12 @@ HEADER_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Hard mode runs are prefixed with a tag line, e.g. "[HARD MODE] [WEEK 21]".
+# Their puzzles have modifiers and different bonuses/penalties, so they aren't
+# comparable with normal runs and are ignored entirely. The optional
+# backslashes allow for Discord-escaped brackets.
+HARD_MODE_RE = re.compile(r"\\?\[\s*hard\s*mode\s*\\?\]", re.IGNORECASE)
+
 # Matches a category line, e.g. "🟩 Sudoku: 0:52.24 (−10s) ✨".
 # Groups: name, optional minutes, seconds, optional adjustment text.
 CATEGORY_RE = re.compile(
@@ -208,8 +214,10 @@ class Gauntle(LeaderboardCog, name="gauntle"):
         ``payload`` holds the run's ``total`` seconds and a ``categories`` map of
         category name to ``{"raw": solve seconds, "adj": bonus/penalty seconds}``
         (effective time = raw + adj). Returns None if the message isn't a
-        Gauntle result.
+        Gauntle result, or is a hard mode run (which isn't tracked).
         """
+        if HARD_MODE_RE.search(content):
+            return None
         header = HEADER_RE.search(content)
         if header is None:
             return None
