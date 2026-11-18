@@ -453,3 +453,20 @@ class TestRenames:
         cog._snapshot_friends = failed_snapshot
         await self.days(db, "oldname", [1])
         assert await cog._carry_history("oldname", "newname") == 0
+
+
+class TestStartup:
+    async def test_archives_then_snapshots_friends_once(self):
+        cog = Krillion(SimpleNamespace())
+        calls = []
+
+        async def archive():
+            calls.append("archive")
+
+        async def snapshot():
+            calls.append("friends")
+
+        cog._archive_today, cog._snapshot_friends = archive, snapshot
+        await cog.on_ready()
+        await cog.on_ready()  # a reconnect fires on_ready again
+        assert calls == ["archive", "friends"]

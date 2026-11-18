@@ -414,10 +414,13 @@ class Krillion(LeaderboardCog, name="krillion"):
     async def on_ready(self) -> None:
         # Catch-up fetch on startup: a bot that was asleep at FETCH_AT still
         # archives today's on boot, and fills any missed days from the archive.
+        # Then a Friends snapshot, so a bot that was down for one of the
+        # scheduled ones still has today's results (once today's archived).
         if self._archived_on_boot:
             return
         self._archived_on_boot = True
         await self._archive_today()
+        await self._snapshot_friends()
 
     # ------------------------------------------------------------------ #
     # Friends' answers
