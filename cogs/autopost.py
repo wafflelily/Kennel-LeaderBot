@@ -4,7 +4,9 @@ Automatic month-end leaderboard posting.
 Channels opt in per game with the owner-only /autopost command; a daily task
 then posts the finished month's final leaderboard for every opted-in
 (game, channel) pair on the 1st of the month, using the same embeds as the
-manual commands (each leaderboard cog's ``build_leaderboard``).
+manual commands (each leaderboard cog's ``build_leaderboard``). Games with a
+``build_daily_post`` (Krillion's friends' answers) also get that posted every
+day by the same task.
 """
 
 import datetime as dt
@@ -173,6 +175,15 @@ class AutoPost(commands.Cog, name="autopost"):
                 f"On the 1st of each month I'll post the previous month's final "
                 f"{names} leaderboard{'s' if len(targets) != 1 else ''} in this channel."
             )
+            daily = [
+                name for name in targets if hasattr(games[name], "build_daily_post")
+            ]
+            if daily:
+                description += (
+                    f"\n\nFor {', '.join(f'`{name}`' for name in daily)} I'll also post "
+                    "the previous day's answers from members who linked their account "
+                    "(e.g. `/krillionlink`) each morning."
+                )
         else:
             description = f"Automatic monthly posts for {names} are off in this channel."
         await context.send(
@@ -189,7 +200,32 @@ class AutoPost(commands.Cog, name="autopost"):
 
     @tasks.loop(time=POST_AT)
     async def monthly_post(self) -> None:
-        """Runs daily; on the 1st, posts last month's boards to opted-in channels."""
+        """
+        Runs daily: posts any game's daily recap (e.g. Krillion friends'
+        answers) to opted-in channels, and on the 1st, last month's boards.
+        """
+        for game, cog in self._games().items():
+            if not hasattr(cog, "build_daily_post"):
+                continue
+            for channel_id in await self.bot.database.get_autopost_channels(game):
+                channel = self.bot.get_channel(channel_id)
+                if channel is None:
+                    continue
+                try:
+                    embed = await cog.build_daily_post(channel)
+                    if embed is not None:
+                        await channel.send(embed=embed)
+                except discord.Forbidden:
+                    self.bot.logger.warning(
+                        f"Daily post: missing permissions for {game} "
+                        f"in channel {channel_id}"
+                    )
+                except Exception:
+                    self.bot.logger.error(
+                        f"Daily post failed for {game} in channel {channel_id}",
+                        exc_info=True,
+                    )
+
         if dt.datetime.now(dt.timezone.utc).day != 1:
             return
         # On the 1st, the default window is exactly the month that just ended.

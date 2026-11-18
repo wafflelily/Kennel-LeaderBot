@@ -41,7 +41,8 @@ import asyncio
 import os
 import re
 from collections import Counter, defaultdict
-from datetime import date, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import aiohttp
 import discord
@@ -93,11 +94,38 @@ ARCHIVE_REVEAL_URL = "https://krillion.io/api/archive/{day}/reveal"
 UNLOCK_HEADER = "x-krillion-unlock"
 # Pause between archive requests, to go easy on a one-person site.
 ARCHIVE_DELAY = 1.0
-# When the daily fetch runs (UTC; the puzzle resets at 04:00 UTC).
+# When the daily fetch runs (UTC; the puzzle resets at midnight US Eastern,
+# 04:00 or 05:00 UTC depending on daylight saving).
 FETCH_AT = time(hour=12, tzinfo=timezone.utc)
+RESET_TZ = ZoneInfo("America/New_York")
 # The points values that mark a shrimp and a too smart answer.
 SHRIMP_POINTS = 100
 TOO_SMART_POINTS = 15
+
+# The site's Friends tab: today's scores of the bot owner's Krillion friends,
+# plus the answers of friends who turned on "Share my answers with friends".
+# It needs the owner's Google sign-in, so the bot keeps the site's Firebase
+# refresh token (KRILLION_REFRESH_TOKEN) and swaps it for an hour-long ID
+# token. Only the current day is served, so it's snapshotted in the evening;
+# the answers are only shown for members who linked themselves with
+# /krillionlink, and only once the day is over.
+FRIENDS_URL = "https://krillion.io/api/friends"
+# krillion.io's public Firebase web API key (it ships in the site's own JS).
+FIREBASE_API_KEY = "AIzaSyBaZVDjFZV4zv5OaOApvy-nVQSOl0bf_ok"
+TOKEN_URL = f"https://securetoken.googleapis.com/v1/token?key={FIREBASE_API_KEY}"
+# When to snapshot the Friends tab (US Eastern, the site's day): spread from
+# the afternoon on, so one failed fetch doesn't lose the day, with the last
+# shortly before the midnight reset to catch late players.
+FRIENDS_AT = [
+    time(hour=15, tzinfo=RESET_TZ),
+    time(hour=18, tzinfo=RESET_TZ),
+    time(hour=21, tzinfo=RESET_TZ),
+    time(hour=23, minute=45, tzinfo=RESET_TZ),
+]
+# krillion.io usernames as typed by members (a leading @ is stripped).
+USERNAME_RE = re.compile(r"[A-Za-z0-9_.-]{1,32}")
+# Points value -> grid symbol, for showing friends' answers.
+SYMBOLS = {points: symbol for symbol, points in VALUES.items()}
 
 
 def _short(text: str, limit: int = 60) -> str:
@@ -137,18 +165,72 @@ def _star_note(answers: list[str], limit: int = 40) -> str:
     return _short(" / ".join(answers), limit)
 
 
+def _friend_round(day: dict | None, info: dict, slot: int) -> dict | None:
+    """
+    One friend's stored round for a prompt slot, or None.
+
+    Rounds are matched to prompts by position; if the round's prompt text
+    disagrees with the archived one, it's not trusted.
+    """
+    rounds = (day or {}).get("answers") or []
+    if slot >= len(rounds) or not isinstance(rounds[slot], dict):
+        return None
+    texts = info.get("prompts") or []
+    prompt = rounds[slot].get("prompt")
+    if prompt and slot < len(texts) and prompt.strip().lower() != texts[slot].strip().lower():
+        return None
+    return rounds[slot]
+
+
+def _given_answers(days: list[dict | None], info: dict, slot: int, points: int) -> list[str]:
+    """The answers these friends gave on a prompt slot that scored ``points``."""
+    given = []
+    for day in days:
+        played = _friend_round(day, info, slot)
+        if played and played.get("score") == points and played.get("answer"):
+            given.append(played["answer"])
+    return given
+
+
+def _narrow(candidates: list[str], given: list[str]) -> list[str]:
+    """
+    Narrow a prompt's archived answers to the ones players actually gave.
+
+    Given answers are matched to the archived spelling case-insensitively;
+    one that matches none of them is kept as given. With nothing given, all
+    the candidates stand.
+    """
+    if not given:
+        return candidates
+    wanted = {g.strip().lower() for g in given}
+    found = [c for c in candidates if c.strip().lower() in wanted]
+    known = {c.strip().lower() for c in found}
+    for g in given:
+        if g.strip().lower() not in known:
+            known.add(g.strip().lower())
+            found.append(g.strip())
+    return found
+
+
 class Krillion(LeaderboardCog, name="krillion"):
     GAME = "krillion"
 
     def __init__(self, bot) -> None:
         super().__init__(bot)
         self._archived_on_boot = False
+        # Cached Firebase ID token for the Friends tab: (token, expires at).
+        self._id_token: tuple[str, datetime] | None = None
+        # From the last Friends fetch: the owner's username and their friends'.
+        self._owner_username: str | None = None
+        self._friend_usernames: set[str] = set()
 
     async def cog_load(self) -> None:
         self.prompt_archiver.start()
+        self.friends_snapshot.start()
 
     async def cog_unload(self) -> None:
         self.prompt_archiver.cancel()
+        self.friends_snapshot.cancel()
 
     # ------------------------------------------------------------------ #
     # Prompt archive
@@ -332,6 +414,289 @@ class Krillion(LeaderboardCog, name="krillion"):
             return
         self._archived_on_boot = True
         await self._archive_today()
+
+    # ------------------------------------------------------------------ #
+    # Friends' answers
+    # ------------------------------------------------------------------ #
+
+    async def _friends_id_token(self, session, refresh_token: str) -> str | None:
+        """A Firebase ID token for the owner's account, refreshed as needed."""
+        now = datetime.now(timezone.utc)
+        if self._id_token is not None and self._id_token[1] > now:
+            return self._id_token[0]
+        try:
+            async with session.post(
+                TOKEN_URL,
+                data={"grant_type": "refresh_token", "refresh_token": refresh_token},
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    self.bot.logger.warning(
+                        f"Krillion sign-in refresh failed (HTTP {resp.status}); "
+                        "is KRILLION_REFRESH_TOKEN still valid?"
+                    )
+                    return None
+                data = await resp.json()
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+            return None
+        token = data.get("id_token")
+        if not token:
+            return None
+        # Renew five minutes early so a request never goes out with a stale one.
+        lifetime = int(data.get("expires_in", 3600)) - 300
+        self._id_token = (token, now + timedelta(seconds=max(lifetime, 60)))
+        return token
+
+    @staticmethod
+    def _friend_day(entry) -> tuple[str, dict] | None:
+        """
+        Reshape one Friends leaderboard entry into ``(username, payload)`` for
+        storage, or None if it has no shared answers (not played yet, or the
+        friend keeps their answers private).
+        """
+        if not isinstance(entry, dict) or not isinstance(entry.get("username"), str):
+            return None
+        rounds = entry.get("answers")
+        if not isinstance(rounds, list) or len(rounds) != PROMPTS:
+            return None
+        answers = []
+        for played in rounds:
+            if not isinstance(played, dict):
+                return None
+            answers.append(
+                {
+                    "prompt": played.get("prompt"),
+                    "answer": played.get("answer"),
+                    "score": played.get("score") or 0,
+                }
+            )
+        return entry["username"], {
+            "username": entry["username"],
+            "score": entry.get("score"),
+            "answers": answers,
+        }
+
+    async def _snapshot_friends(self) -> None:
+        """
+        Fetch today's Friends tab and store every shared set of answers under
+        the day's number. Does nothing without KRILLION_REFRESH_TOKEN, or while
+        the board is still locked (the owner hasn't finished today's daily).
+        """
+        refresh_token = os.getenv("KRILLION_REFRESH_TOKEN")
+        if not refresh_token:
+            return
+        async with aiohttp.ClientSession() as session:
+            token = await self._friends_id_token(session, refresh_token)
+            if token is None:
+                return
+            board = await self._get_json(
+                session, FRIENDS_URL, {"Authorization": f"Bearer {token}"}
+            )
+        if not isinstance(board, dict) or not isinstance(board.get("leaderboard"), list):
+            # Most likely an expired ID token; get a fresh one next time.
+            self._id_token = None
+            return
+        profile = board.get("profile") or {}
+        self._owner_username = profile.get("username")
+        self._friend_usernames = {
+            e["username"].lower()
+            for e in board["leaderboard"]
+            if isinstance(e, dict) and isinstance(e.get("username"), str)
+        }
+        if not board.get("unlocked"):
+            return
+
+        stored = await self.bot.database.get_puzzle_info(self.GAME)
+        day = next((d for d, i in stored.items() if i.get("date") == board.get("date")), None)
+        if day is None:
+            # Today's puzzle isn't archived yet (e.g. just after the reset).
+            await self._archive_today()
+            stored = await self.bot.database.get_puzzle_info(self.GAME)
+            day = next(
+                (d for d, i in stored.items() if i.get("date") == board.get("date")),
+                None,
+            )
+            if day is None:
+                return
+        for entry in board["leaderboard"]:
+            found = self._friend_day(entry)
+            if found is not None:
+                await self.bot.database.set_krillion_friend_answers(day, *found)
+
+    @tasks.loop(time=FRIENDS_AT)
+    async def friends_snapshot(self) -> None:
+        await self._snapshot_friends()
+
+    @friends_snapshot.before_loop
+    async def before_friends_snapshot(self) -> None:
+        await self.bot.wait_until_ready()
+
+    async def _linked_days(self) -> dict[int, dict[int, dict]]:
+        """Linked members' stored answers: puzzle -> Discord user id -> payload."""
+        links = await self.bot.database.get_krillion_links()
+        stored = await self.bot.database.get_krillion_friend_answers()
+        return {
+            puzzle: {
+                user_id: friends[username]
+                for user_id, username in links.items()
+                if username in friends
+            }
+            for puzzle, friends in stored.items()
+        }
+
+    @commands.hybrid_command(
+        name="krillionlink",
+        description="Link your krillion.io username so your shared answers can be shown here.",
+    )
+    @app_commands.describe(username="Your krillion.io username, e.g. `shrimpfan`.")
+    async def krillionlink(self, context: Context, username: str) -> None:
+        """
+        Link the caller's Discord account to their Krillion username.
+
+        :param context: The hybrid command context.
+        :param username: The caller's krillion.io username.
+        """
+        username = username.strip().lstrip("@")
+        if not USERNAME_RE.fullmatch(username):
+            await context.send(
+                embed=discord.Embed(
+                    title="Error!",
+                    description=f"`{username}` doesn't look like a Krillion username.",
+                    color=0xE02B2B,
+                ),
+                ephemeral=True,
+            )
+            return
+        if not await self.bot.database.set_krillion_link(context.author.id, username):
+            await context.send(
+                embed=discord.Embed(
+                    title="Error!",
+                    description=(
+                        f"`@{username}` is already linked to someone else. "
+                        "If it's yours, ask the bot owner to unlink it."
+                    ),
+                    color=0xE02B2B,
+                ),
+                ephemeral=True,
+            )
+            return
+        owner = f"`@{self._owner_username}`" if self._owner_username else "the bot owner"
+        description = (
+            f"Linked you to Krillion user `@{username}`.\n\n"
+            f"If you're friends with {owner} on krillion.io and have **Share my "
+            "answers with friends** turned on, then once each day is over:\n"
+            "• your answers appear in the daily Krillion post in channels with "
+            "Krillion auto-posts on\n"
+            "• your exact shrimp 🌟 and too smart 🤡 answers are named in "
+            "`/mystats` and the leaderboards\n\n"
+            "Run `/krillionunlink` any time to stop and delete your stored answers."
+        )
+        if self._friend_usernames and username.lower() not in self._friend_usernames:
+            description += (
+                f"\n\n⚠️ `@{username}` isn't on the friends list yet — add {owner} "
+                "as a friend on krillion.io."
+            )
+        await context.send(
+            embed=discord.Embed(
+                title="🦐 Krillion link", description=description, color=0xBEBEFE
+            ),
+            ephemeral=True,
+        )
+
+    @commands.hybrid_command(
+        name="krillionunlink",
+        description="Unlink your krillion.io username and delete your stored answers.",
+    )
+    @app_commands.describe(member="Owner only: unlink someone else.")
+    async def krillionunlink(
+        self, context: Context, member: discord.User = None
+    ) -> None:
+        """
+        Remove a Krillion link and the answers stored for it.
+
+        :param context: The hybrid command context.
+        :param member: Owner only: the member to unlink instead of the caller.
+        """
+        target = context.author
+        if member is not None and member.id != context.author.id:
+            if not await self.bot.is_owner(context.author):
+                await context.send(
+                    embed=discord.Embed(
+                        title="Error!",
+                        description="Only the bot owner can unlink someone else.",
+                        color=0xE02B2B,
+                    ),
+                    ephemeral=True,
+                )
+                return
+            target = member
+        username = await self.bot.database.delete_krillion_link(target.id)
+        if username is None:
+            description = "There's no Krillion link to remove."
+        else:
+            description = (
+                f"Unlinked Krillion user `@{username}` and deleted their stored answers."
+            )
+        await context.send(
+            embed=discord.Embed(
+                title="🦐 Krillion link", description=description, color=0xBEBEFE
+            ),
+            ephemeral=True,
+        )
+
+    async def build_daily_post(self, channel) -> discord.Embed | None:
+        """
+        The previous day's answers from linked members of this channel's
+        server, for the daily auto-post. Returns None when there's nothing
+        to show.
+        """
+        guild = getattr(channel, "guild", None)
+        if guild is None:
+            return None
+        yesterday = (datetime.now(RESET_TZ) - timedelta(days=1)).date().isoformat()
+        stored = await self.bot.database.get_puzzle_info(self.GAME)
+        day = next((d for d, i in stored.items() if i.get("date") == yesterday), None)
+        if day is None:
+            return None
+        info = stored[day]
+        players = {
+            user_id: played
+            for user_id, played in (await self._linked_days()).get(day, {}).items()
+            if guild.get_member(user_id) is not None
+        }
+        if not players:
+            return None
+        names = await self._resolve_names(
+            guild, list(players), {uid: p["username"] for uid, p in players.items()}
+        )
+        order = sorted(players, key=lambda uid: -(players[uid].get("score") or 0))
+
+        embed = discord.Embed(
+            title=f"🦐 Krillion #{day} — the catch",
+            description=" · ".join(
+                f"**{names[uid]}** {players[uid].get('score') or 0}" for uid in order
+            ),
+            color=0xBEBEFE,
+        )
+        texts = info.get("prompts") or []
+        for slot in range(PROMPTS):
+            prompt = texts[slot] if slot < len(texts) else f"Round {slot + 1}"
+            lines = []
+            for uid in order:
+                played = _friend_round(players[uid], info, slot)
+                if played is None:
+                    continue
+                symbol = SYMBOLS.get(played.get("score"), "⬛")
+                answer = _short(played.get("answer") or "*no answer*", 40)
+                lines.append(f"{symbol} {answer} — {names[uid]}")
+            if lines:
+                embed.add_field(
+                    name=_short(f"{slot + 1}. {prompt}", 250),
+                    value=_short("\n".join(lines), 1024),
+                    inline=False,
+                )
+        embed.set_footer(text=f"{info.get('date')} · linked with /krillionlink")
+        return embed
 
     # ------------------------------------------------------------------ #
     # Parsing
@@ -578,6 +943,9 @@ class Krillion(LeaderboardCog, name="krillion"):
         # the group collectively aced and flunked. Needs the prompt texts, so
         # only days that were archived (from the bot's deployment on) qualify.
         prompt_info = await self.bot.database.get_puzzle_info(self.GAME)
+        # Linked players' own answers, to narrow a prompt with several star
+        # (or too smart) answers down to the ones actually given here.
+        linked = await self._linked_days()
         grids: dict[int, list[list[int]]] = defaultdict(list)
         for entry in players.values():
             for puzzle, answers in entry["answers"].items():
@@ -590,6 +958,9 @@ class Krillion(LeaderboardCog, name="krillion"):
             texts = info.get("prompts") or []
             if len(all_answers) < 2:
                 continue
+            given_days = [
+                linked.get(puzzle, {}).get(author_id) for author_id in players
+            ]
             for slot, text in enumerate(texts[:PROMPTS]):
                 average = sum(answers[slot] for answers in all_answers) / len(
                     all_answers
@@ -600,12 +971,26 @@ class Krillion(LeaderboardCog, name="krillion"):
                 got_shrimp = any(
                     answers[slot] == VALUES[SHRIMP] for answers in all_answers
                 )
-                stars = _star_answers(info, slot) if got_shrimp else []
+                stars = (
+                    _narrow(
+                        _star_answers(info, slot),
+                        _given_answers(given_days, info, slot, SHRIMP_POINTS),
+                    )
+                    if got_shrimp
+                    else []
+                )
                 # Same rule for the too smart answer, shown on worst questions.
                 got_too_smart = any(
                     answers[slot] == VALUES[TOO_SMART] for answers in all_answers
                 )
-                clever = _too_smart_answers(info, slot) if got_too_smart else []
+                clever = (
+                    _narrow(
+                        _too_smart_answers(info, slot),
+                        _given_answers(given_days, info, slot, TOO_SMART_POINTS),
+                    )
+                    if got_too_smart
+                    else []
+                )
                 questions.append((average, text, puzzle, stars, clever))
 
         def _line(average, text, puzzle, stars, clever=()) -> str:
@@ -696,9 +1081,11 @@ class Krillion(LeaderboardCog, name="krillion"):
         # Which questions they caught a shrimp (or a too smart answer) on,
         # naming the answer where it's known. Usually a prompt has a single
         # such answer, so the catch pins it down; where a prompt has several we
-        # list them all with "/". Needs the archived sheet, so only archived
-        # days can be named.
+        # list them all with "/", unless the player linked their Krillion
+        # account and their own answer that day is stored. Needs the archived
+        # sheet, so only archived days can be named.
         prompt_info = await self.bot.database.get_puzzle_info(self.GAME)
+        linked = await self._linked_days()
         for symbol, title, lookup in (
             (SHRIMP, "Shrimp catches", _star_answers),
             (TOO_SMART, "Too smart catches", _too_smart_answers),
@@ -713,7 +1100,11 @@ class Krillion(LeaderboardCog, name="krillion"):
                 for slot, value in enumerate(answers):
                     if value != VALUES[symbol] or slot >= len(texts):
                         continue
-                    named_answers = lookup(info, slot)
+                    own_day = linked.get(puzzle, {}).get(author_id)
+                    named_answers = _narrow(
+                        lookup(info, slot),
+                        _given_answers([own_day], info, slot, VALUES[symbol]),
+                    )
                     named = (
                         f" → **{_star_note(named_answers)}**" if named_answers else ""
                     )

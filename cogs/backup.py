@@ -2,9 +2,10 @@
 Daily database backups.
 
 The leaderboard cache is rebuildable from Discord history, but the rest of
-database.db is not: intro channels, invite aliases and overrides, and autopost
-opt-ins are hand-curated state that would be gone for good with the file. A
-daily task snapshots the database into ``database/backups/`` (inside the same
+database.db is not: intro channels, invite aliases and overrides, autopost
+opt-ins and Krillion links are hand-curated state, and Krillion's archived
+puzzles and friends' answers can't be fetched again; all of it would be gone
+for good with the file. A daily task snapshots the database into ``database/backups/`` (inside the same
 container volume mount as the database itself) keeping the last ``KEEP`` days, a
 catch-up snapshot is taken on startup if today's is missing, and the
 owner-only /backup command takes one on demand.

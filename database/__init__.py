@@ -141,6 +141,78 @@ class DatabaseManager:
             result = await cursor.fetchall()
         return {int(row[0]): json.loads(row[1]) for row in result}
 
+    async def set_krillion_link(self, user_id: int, username: str) -> bool:
+        """
+        Link a Discord user to a Krillion username (replacing any earlier
+        link of theirs). Returns False if another user already has it.
+        """
+        username = username.lower()
+        rows = await self.connection.execute(
+            "SELECT user_id FROM krillion_links WHERE username=?", (username,)
+        )
+        async with rows as cursor:
+            row = await cursor.fetchone()
+        if row is not None and int(row[0]) != user_id:
+            return False
+        await self.connection.execute(
+            "INSERT INTO krillion_links (user_id, username) VALUES (?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET username=excluded.username",
+            (str(user_id), username),
+        )
+        await self.connection.commit()
+        return True
+
+    async def delete_krillion_link(self, user_id: int) -> str | None:
+        """
+        Remove a user's Krillion link along with the stored answers for that
+        username. Returns the username that was unlinked, or None.
+        """
+        links = await self.get_krillion_links()
+        username = links.get(user_id)
+        if username is None:
+            return None
+        await self.connection.execute(
+            "DELETE FROM krillion_links WHERE user_id=?", (str(user_id),)
+        )
+        await self.connection.execute(
+            "DELETE FROM krillion_friend_answers WHERE username=?", (username,)
+        )
+        await self.connection.commit()
+        return username
+
+    async def get_krillion_links(self) -> dict[int, str]:
+        """Return every Krillion link: Discord user id -> lowercased username."""
+        rows = await self.connection.execute(
+            "SELECT user_id, username FROM krillion_links"
+        )
+        async with rows as cursor:
+            result = await cursor.fetchall()
+        return {int(row[0]): row[1] for row in result}
+
+    async def set_krillion_friend_answers(
+        self, puzzle: int, username: str, payload: dict
+    ) -> None:
+        """Store (or overwrite) one friend's answers for one Krillion day."""
+        await self.connection.execute(
+            "INSERT INTO krillion_friend_answers (puzzle, username, payload) "
+            "VALUES (?, ?, ?) ON CONFLICT(puzzle, username) "
+            "DO UPDATE SET payload=excluded.payload",
+            (puzzle, username.lower(), json.dumps(payload)),
+        )
+        await self.connection.commit()
+
+    async def get_krillion_friend_answers(self) -> dict[int, dict[str, dict]]:
+        """Return all stored friends' answers: puzzle -> username -> payload."""
+        rows = await self.connection.execute(
+            "SELECT puzzle, username, payload FROM krillion_friend_answers"
+        )
+        async with rows as cursor:
+            result = await cursor.fetchall()
+        found: dict[int, dict[str, dict]] = {}
+        for puzzle, username, payload in result:
+            found.setdefault(int(puzzle), {})[username] = json.loads(payload)
+        return found
+
     async def set_autopost(self, game: str, channel_id: int, enabled: bool) -> None:
         """Opt a channel in or out of the monthly automatic leaderboard post."""
         if enabled:

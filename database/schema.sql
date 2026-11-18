@@ -52,6 +52,26 @@ CREATE TABLE IF NOT EXISTS `puzzle_info` (
   PRIMARY KEY (`game`, `puzzle`)
 );
 
+-- Discord members' krillion.io usernames, each set by the member themselves
+-- with /krillionlink. Linking is the Discord-side opt-in: only linked
+-- players' shared answers are ever shown. `username` is lowercased.
+CREATE TABLE IF NOT EXISTS `krillion_links` (
+  `user_id` TEXT NOT NULL PRIMARY KEY,
+  `username` TEXT NOT NULL UNIQUE
+);
+
+-- Krillion friends' answers, as shared with the bot owner's account on the
+-- site's Friends tab (only friends who turned on answer sharing). The site
+-- only serves the current day, so the bot snapshots it through the day.
+-- `username` is lowercased; `payload` holds the display username, score and
+-- the 7 rounds ({prompt, answer, score}).
+CREATE TABLE IF NOT EXISTS `krillion_friend_answers` (
+  `puzzle` INTEGER NOT NULL,
+  `username` TEXT NOT NULL,
+  `payload` TEXT NOT NULL,
+  PRIMARY KEY (`puzzle`, `username`)
+);
+
 -- Channels that get an automatic leaderboard post for a game on the 1st of
 -- each month (opted in via /autopost).
 CREATE TABLE IF NOT EXISTS `leaderboard_autopost` (

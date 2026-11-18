@@ -3,3 +3,4 @@ aiosqlite
 discord.py==2.7.1
 pillow
 python-dotenv
+tzdata
