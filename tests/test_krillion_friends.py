@@ -49,12 +49,12 @@ class TestLinks:
         assert await db.set_krillion_link(1, "other")
         assert await db.get_krillion_links() == {1: "other"}
 
-    async def test_unlink_deletes_stored_answers(self, db):
+    async def test_unlink_keeps_stored_answers(self, db):
         await db.set_krillion_link(1, "fan")
         await db.set_krillion_friend_answers(47, "Fan", {"username": "Fan"})
-        await db.set_krillion_friend_answers(47, "keep", {"username": "keep"})
         assert await db.delete_krillion_link(1) == "fan"
-        assert await db.get_krillion_friend_answers() == {47: {"keep": {"username": "keep"}}}
+        assert await db.get_krillion_links() == {}
+        assert await db.get_krillion_friend_answers() == {47: {"fan": {"username": "Fan"}}}
         assert await db.delete_krillion_link(1) is None
 
 
@@ -82,10 +82,16 @@ class TestFriendDay:
         assert payload["answers"][0] == {"prompt": "Q1", "answer": "a", "score": 100}
         assert payload["answers"][1]["score"] == 0
 
+    def test_private_friend_is_stored_with_just_a_score(self):
+        entry = {"username": "Shy", "score": 245, "answers": None, "rank": 2}
+        assert Krillion._friend_day(entry) == (
+            "Shy", {"username": "Shy", "score": 245, "answers": None}
+        )
+
     @pytest.mark.parametrize(
         "entry",
         [
-            {"username": "x", "score": None, "answers": None},  # not played / private
+            {"username": "x", "score": None, "answers": None},  # not played yet
             {"username": "x", "answers": [{}] * 6},  # wrong round count
             {"answers": [{}] * 7},  # no username
             "junk",
@@ -118,6 +124,7 @@ class TestSnapshot:
                 friend("Owner", ["o"] * 7, [30] * 7, self=True),
                 friend("Fan", ["f"] * 7, [100] * 7),
                 {"username": "Late", "score": None, "answers": None, "rank": 3},
+                {"username": "Shy", "score": 300, "answers": None, "rank": 2},
             ],
             **overrides,
         }
@@ -138,10 +145,12 @@ class TestSnapshot:
         await cog._snapshot_friends()
         assert calls == [(krillion_module.FRIENDS_URL, {"Authorization": "Bearer id-token"})]
         stored = await db.get_krillion_friend_answers()
-        assert sorted(stored[47]) == ["fan", "owner"]
+        # Everyone who played, private or not; not the friend yet to play.
+        assert sorted(stored[47]) == ["fan", "owner", "shy"]
+        assert stored[47]["shy"] == {"username": "Shy", "score": 300, "answers": None}
         assert stored[47]["fan"]["answers"][0] == {"prompt": "Q1", "answer": "f", "score": 100}
         assert cog._owner_username == "Owner"
-        assert cog._friend_usernames == {"owner", "fan", "late"}
+        assert cog._friend_usernames == {"owner", "fan", "late", "shy"}
 
     async def test_locked_board_stores_nothing(self, cog, db):
         await db.set_puzzle_info("krillion", 47, {"date": "2026-08-30", "prompts": PROMPTS})
@@ -314,6 +323,31 @@ class TestDailyPost:
         await self.player(db, 43, "bob", ["a"] * 7, [60] * 7)
         assert await cog.build_daily_post(channel) is not None
 
+    async def test_private_players_dont_count_or_show(self, cog, db, channel):
+        await self.player(db, 42, "alice", ["a"] * 7, [10] * 7)
+        await self.player(db, 43, "bob", ["a"] * 7, [60] * 7)
+        await db.set_krillion_link(44, "cat")
+        await db.set_krillion_friend_answers(
+            47, "cat", {"username": "cat", "score": 700, "answers": None}
+        )
+        await db.upsert_leaderboard_result(
+            "krillion", self.CHANNEL, 3, 44, "cat", date(2026, 8, 30),
+            {"puzzle": 47, "score": 700, "answers": None},
+        )
+        embed, _ = await cog.build_daily_post(channel)
+        assert embed.description == "**Bob** 420 · **Alice** 70"
+        # And on their own, a private player doesn't make up the pair.
+        await db.delete_krillion_link(43)
+        assert await cog.build_daily_post(channel) is None
+
+    async def test_relinking_brings_history_back(self, cog, db, channel):
+        await self.player(db, 42, "alice", ["a"] * 7, [10] * 7)
+        await self.player(db, 43, "bob", ["a"] * 7, [60] * 7)
+        await db.delete_krillion_link(43)
+        assert await cog.build_daily_post(channel) is None
+        await db.set_krillion_link(43, "bob")
+        assert await cog.build_daily_post(channel) is not None
+
     async def test_unlinked_players_dont_count(self, cog, db, channel):
         await self.player(db, 42, "alice", ["a"] * 7, [10] * 7)
         await self.player(db, 43, "bob", ["a"] * 7, [60] * 7, linked=False)
@@ -357,3 +391,65 @@ class TestTableImage:
         ]
         png = render_day_table(47, "2026-08-30", PROMPTS, columns)
         assert png.startswith(b"\x89PNG")
+
+
+class TestRenames:
+    @pytest.fixture
+    def cog(self, db):
+        cog = Krillion(SimpleNamespace(database=db))
+        cog._friend_usernames = {"newname", "someone"}
+        return cog
+
+    async def days(self, db, username, puzzles):
+        for puzzle in puzzles:
+            await db.set_krillion_friend_answers(
+                puzzle, username, {"username": username, "score": puzzle, "answers": None}
+            )
+
+    async def test_database_rename_keeps_the_new_names_days(self, db):
+        await self.days(db, "old", [1, 2])
+        await self.days(db, "new", [2, 3])
+        assert await db.rename_krillion_friend("Old", "New") == 1
+        stored = await db.get_krillion_friend_answers()
+        assert sorted(p for p, d in stored.items() if "new" in d) == [1, 2, 3]
+        assert stored[2]["new"]["score"] == 2  # the new name's own row stood
+        assert stored[2]["old"]["score"] == 2  # the clashing old row is left
+
+    async def test_moves_history_after_a_rename(self, cog, db):
+        await self.days(db, "oldname", [1, 2])
+        await self.days(db, "newname", [3])
+        assert await cog._carry_history("oldname", "NewName") == 2
+        stored = await db.get_krillion_friend_answers()
+        assert all(list(day) == ["newname"] for day in stored.values())
+
+    async def test_no_move_while_the_old_name_is_still_a_friend(self, cog, db):
+        await self.days(db, "someone", [1, 2])
+        assert await cog._carry_history("someone", "newname") == 0
+
+    async def test_no_move_when_both_names_played_the_same_day(self, cog, db):
+        await self.days(db, "oldname", [1, 2])
+        await self.days(db, "newname", [2])
+        assert await cog._carry_history("oldname", "newname") == 0
+
+    async def test_fetches_the_friends_list_if_unknown(self, cog, db):
+        cog._friend_usernames = set()
+        fetched = []
+
+        async def fake_snapshot():
+            fetched.append(True)
+            cog._friend_usernames = {"newname"}
+
+        cog._snapshot_friends = fake_snapshot
+        await self.days(db, "oldname", [1])
+        assert await cog._carry_history("oldname", "newname") == 1
+        assert fetched == [True]
+
+    async def test_no_move_if_the_friends_list_cant_be_fetched(self, cog, db):
+        cog._friend_usernames = set()
+
+        async def failed_snapshot():
+            pass
+
+        cog._snapshot_friends = failed_snapshot
+        await self.days(db, "oldname", [1])
+        assert await cog._carry_history("oldname", "newname") == 0

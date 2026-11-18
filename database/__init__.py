@@ -164,8 +164,9 @@ class DatabaseManager:
 
     async def delete_krillion_link(self, user_id: int) -> str | None:
         """
-        Remove a user's Krillion link along with the stored answers for that
-        username. Returns the username that was unlinked, or None.
+        Remove a user's Krillion link. Their stored answers are kept, and are
+        treated like any unlinked friend's: stored, never shown. Returns the
+        username that was unlinked, or None.
         """
         links = await self.get_krillion_links()
         username = links.get(user_id)
@@ -174,11 +175,24 @@ class DatabaseManager:
         await self.connection.execute(
             "DELETE FROM krillion_links WHERE user_id=?", (str(user_id),)
         )
-        await self.connection.execute(
-            "DELETE FROM krillion_friend_answers WHERE username=?", (username,)
-        )
         await self.connection.commit()
         return username
+
+    async def rename_krillion_friend(self, old: str, new: str) -> int:
+        """
+        Move one Krillion friend's stored days from an old username to a new
+        one (after a rename on the site). Days the new name already has are
+        left alone. Returns how many days moved.
+        """
+        old, new = old.lower(), new.lower()
+        cursor = await self.connection.execute(
+            "UPDATE krillion_friend_answers SET username=? WHERE username=? "
+            "AND puzzle NOT IN "
+            "(SELECT puzzle FROM krillion_friend_answers WHERE username=?)",
+            (new, old, new),
+        )
+        await self.connection.commit()
+        return cursor.rowcount
 
     async def get_krillion_links(self) -> dict[int, str]:
         """Return every Krillion link: Discord user id -> lowercased username."""

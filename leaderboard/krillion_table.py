@@ -11,7 +11,9 @@ Each tier gets a colour that evokes its emoji: 🌟 gold, 🏮 lantern red,
 🦑 squid pink, 🐟 fish cyan and 🤡 clown orange, all distinct from each other
 (including under colour blindness) on the abyss background. 🫧 plankton, the
 lowest tier, is a faint bubble outline rather than a sixth bright colour. A
-🌟 cell glows, like the site's top-tier marker. Cells hold only the answer;
+🌟 cell glows, like the site's top-tier marker. A ⬛ miss (no answer, 0
+points) is a hatched empty panel, so it can't be mistaken for faint plankton.
+Cells hold only the answer;
 the legend under the table pairs each colour with its emoji and points. The
 emojis are Twemoji images (``assets/emoji``, CC-BY 4.0), so they look the same
 whatever fonts the host has.
@@ -46,6 +48,11 @@ TIERS = {
 }
 PLANKTON = 10
 GLOWING = 100
+# A miss (0 points): ⬛, drawn as a hatched empty panel.
+MISS_EMOJI = "2b1b"
+HATCH = "#2b3e5e"
+MISS_TEXT = "#a9b8d1"
+HATCH_SPACING = 9
 # Gold tinted into the navy panel turns olive, so gold cells sit on a warm
 # dark base instead.
 GOLD_BASE = "#17130a"
@@ -78,6 +85,23 @@ def _emoji(codepoint: str, size: int) -> Image.Image | None:
             return img.convert("RGBA").resize((size * SCALE, size * SCALE), Image.LANCZOS)
     except OSError:
         return None
+
+
+def _hatch(image: Image.Image, box: list[int], radius: int) -> None:
+    """Fill a rounded box with diagonal lines over the empty-panel colour."""
+    x0, y0, x1, y1 = box
+    w, h = x1 - x0, y1 - y0
+    panel = Image.new("RGB", (w, h), SHALLOW)
+    lines = ImageDraw.Draw(panel)
+    step = HATCH_SPACING * SCALE
+    for offset in range(-h, w, step):
+        lines.line([(offset, h), (offset + h, 0)], fill=HATCH, width=SCALE)
+    mask = Image.new("L", (w, h), 0)
+    ImageDraw.Draw(mask).rounded_rectangle([0, 0, w - 1, h - 1], radius=radius, fill=255)
+    image.paste(panel, (x0, y0), mask)
+    ImageDraw.Draw(image).rounded_rectangle(
+        box, radius=radius, outline=LINE_COLOUR, width=SCALE
+    )
 
 
 def _rgb(hex_colour: str) -> tuple[int, int, int]:
@@ -154,7 +178,7 @@ def render_day_table(
     # Legend: colour chip, emoji, points — wrapping when the table is narrow.
     legend = []  # (x, line, points, label)
     x, line = PAD, 0
-    for points in TIERS:
+    for points in [*TIERS, 0]:
         label = str(points)
         chip = 22 + EMOJI + 6 + int(probe.textlength(label, font=body_font) / s)
         if x > PAD and x + chip > width - PAD:
@@ -236,10 +260,17 @@ def render_day_table(
         # Answers sit vertically centred in their cell.
         rows_free = (box[3] - box[1]) // s - 2 * CELL_PAD - max(len(lines), 1) * LINE
         text_y = y0 + CELL_PAD + rows_free // 2
-        if not lines:
-            # A miss: an empty panel.
-            draw.rounded_rectangle(box, radius=6 * s, fill=SHALLOW, outline=LINE_COLOUR, width=s)
-            draw.text(((x0 + CELL_PAD) * s, text_y * s), "—", font=body_font, fill=DRIFT)
+        if not points:
+            # A miss: a hatched panel, with whatever they typed (if anything)
+            # in muted text, since it didn't match an answer.
+            _hatch(image, box, 6 * s)
+            for n, line in enumerate(lines):
+                draw.text(
+                    ((x0 + CELL_PAD) * s, (text_y + n * LINE) * s),
+                    line,
+                    font=body_font,
+                    fill=MISS_TEXT,
+                )
             continue
         _, colour = TIERS.get(points, ("", DRIFT))
         faint = points == PLANKTON
@@ -265,20 +296,25 @@ def render_day_table(
     # Legend: one chip per tier, best first.
     y += 18
     for x, line, points, label in legend:
-        codepoint, colour = TIERS[points]
-        faint = points == PLANKTON
         top = y + line * 28
-        draw.rounded_rectangle(
-            [x * s, top * s, (x + 16) * s, (top + 16) * s],
-            radius=3 * s,
-            fill=_blend(
-                colour,
-                GOLD_BASE if points == GLOWING else SHALLOW,
-                FAINT_TINT if faint else 0.35,
-            ),
-            outline=_blend(colour, SHALLOW, 0.45) if faint else _rgb(colour),
-            width=s,
-        )
+        chip = [x * s, top * s, (x + 16) * s, (top + 16) * s]
+        if points == 0:
+            _hatch(image, chip, 3 * s)
+            codepoint = MISS_EMOJI
+        else:
+            codepoint, colour = TIERS[points]
+            faint = points == PLANKTON
+            draw.rounded_rectangle(
+                chip,
+                radius=3 * s,
+                fill=_blend(
+                    colour,
+                    GOLD_BASE if points == GLOWING else SHALLOW,
+                    FAINT_TINT if faint else 0.35,
+                ),
+                outline=_blend(colour, SHALLOW, 0.45) if faint else _rgb(colour),
+                width=s,
+            )
         emoji = _emoji(codepoint, EMOJI)
         if emoji is not None:
             image.paste(emoji, ((x + 22) * s, (top - 2) * s), emoji)

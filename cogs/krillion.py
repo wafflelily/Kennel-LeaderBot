@@ -128,8 +128,8 @@ FRIENDS_AT = [
 # The daily post only goes out once this many linked members shared that
 # day's result in the channel.
 MIN_DAILY_PLAYERS = 2
-# krillion.io usernames as typed by members (a leading @ is stripped).
-USERNAME_RE = re.compile(r"[A-Za-z0-9_.-]{1,32}")
+# krillion.io usernames, by the site's own rule (a leading @ is stripped).
+USERNAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]{2,19}")
 
 
 def _short(text: str, limit: int = 60) -> str:
@@ -458,12 +458,22 @@ class Krillion(LeaderboardCog, name="krillion"):
     def _friend_day(entry) -> tuple[str, dict] | None:
         """
         Reshape one Friends leaderboard entry into ``(username, payload)`` for
-        storage, or None if it has no shared answers (not played yet, or the
-        friend keeps their answers private).
+        storage, or None if the friend hasn't played yet. A friend who keeps
+        their answers private is stored with just their score (``answers`` is
+        None), and nothing of theirs is ever displayed.
         """
         if not isinstance(entry, dict) or not isinstance(entry.get("username"), str):
             return None
+        score = entry.get("score")
+        if not isinstance(score, int):
+            return None
         rounds = entry.get("answers")
+        if rounds is None:
+            return entry["username"], {
+                "username": entry["username"],
+                "score": score,
+                "answers": None,
+            }
         if not isinstance(rounds, list) or len(rounds) != PROMPTS:
             return None
         answers = []
@@ -479,7 +489,7 @@ class Krillion(LeaderboardCog, name="krillion"):
             )
         return entry["username"], {
             "username": entry["username"],
-            "score": entry.get("score"),
+            "score": score,
             "answers": answers,
         }
 
@@ -553,6 +563,25 @@ class Krillion(LeaderboardCog, name="krillion"):
             for puzzle, friends in stored.items()
         }
 
+    async def _carry_history(self, old: str, new: str) -> int:
+        """
+        Move a member's stored days to their new username when they relink
+        after renaming on krillion.io (the site has no stable friend id, only
+        usernames). Only done when it looks like a real rename: the old name
+        is gone from the friends list, and the two names never played the
+        same day, so a member who'd linked the wrong name can't absorb someone
+        else's history. Returns how many days moved.
+        """
+        if not self._friend_usernames:
+            # Not fetched since startup; one fetch tells us who's still there.
+            await self._snapshot_friends()
+        if not self._friend_usernames or old.lower() in self._friend_usernames:
+            return 0
+        stored = await self.bot.database.get_krillion_friend_answers()
+        if any(old.lower() in day and new.lower() in day for day in stored.values()):
+            return 0
+        return await self.bot.database.rename_krillion_friend(old, new)
+
     @commands.hybrid_command(
         name="krillionlink",
         description="Link your krillion.io username so your shared answers can be shown here.",
@@ -576,6 +605,7 @@ class Krillion(LeaderboardCog, name="krillion"):
                 ephemeral=True,
             )
             return
+        previous = (await self.bot.database.get_krillion_links()).get(context.author.id)
         if not await self.bot.database.set_krillion_link(context.author.id, username):
             await context.send(
                 embed=discord.Embed(
@@ -598,8 +628,15 @@ class Krillion(LeaderboardCog, name="krillion"):
             "Krillion auto-posts on\n"
             "• your exact shrimp 🌟 and too smart 🤡 answers are named in "
             "`/mystats` and the leaderboards\n\n"
-            "Run `/krillionunlink` any time to stop and delete your stored answers."
+            "Run `/krillionunlink` any time to stop."
         )
+        if previous and previous != username.lower():
+            moved = await self._carry_history(previous, username)
+            if moved:
+                description += (
+                    f"\n\nMoved {moved} day{'s' if moved != 1 else ''} of history "
+                    f"from your old username `@{previous}`."
+                )
         if self._friend_usernames and username.lower() not in self._friend_usernames:
             description += (
                 f"\n\n⚠️ `@{username}` isn't on the friends list yet — add {owner} "
@@ -614,7 +651,7 @@ class Krillion(LeaderboardCog, name="krillion"):
 
     @commands.hybrid_command(
         name="krillionunlink",
-        description="Unlink your krillion.io username and delete your stored answers.",
+        description="Unlink your krillion.io username so your answers are no longer shown.",
     )
     @app_commands.describe(member="Owner only: unlink someone else.")
     async def krillionunlink(
@@ -644,7 +681,7 @@ class Krillion(LeaderboardCog, name="krillion"):
             description = "There's no Krillion link to remove."
         else:
             description = (
-                f"Unlinked Krillion user `@{username}` and deleted their stored answers."
+                f"Unlinked Krillion user `@{username}`; their answers are no longer shown."
             )
         await context.send(
             embed=discord.Embed(
@@ -672,8 +709,8 @@ class Krillion(LeaderboardCog, name="krillion"):
         if day is None:
             return None
         info = stored[day]
-        # Only linked members who shared that day's result in this channel,
-        # and only once at least two of them did.
+        # Only linked members who shared their answers with friends and that
+        # day's result in this channel, and only once at least two of them did.
         posted_here = {
             row["author_id"]
             for row in await self._load_all(channel.id)
@@ -682,7 +719,9 @@ class Krillion(LeaderboardCog, name="krillion"):
         players = {
             user_id: played
             for user_id, played in (await self._linked_days()).get(day, {}).items()
-            if user_id in posted_here and guild.get_member(user_id) is not None
+            if played.get("answers")
+            and user_id in posted_here
+            and guild.get_member(user_id) is not None
         }
         if len(players) < MIN_DAILY_PLAYERS:
             return None
