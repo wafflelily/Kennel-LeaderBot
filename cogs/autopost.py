@@ -181,8 +181,9 @@ class AutoPost(commands.Cog, name="autopost"):
             if daily:
                 description += (
                     f"\n\nFor {', '.join(f'`{name}`' for name in daily)} I'll also post "
-                    "the previous day's answers from members who linked their account "
-                    "(e.g. `/krillionlink`) each morning."
+                    "the previous day's answers each morning, from members who linked "
+                    "their account (e.g. `/krillionlink`) and shared that day's result "
+                    "here — whenever at least two did."
                 )
         else:
             description = f"Automatic monthly posts for {names} are off in this channel."
@@ -212,9 +213,17 @@ class AutoPost(commands.Cog, name="autopost"):
                 if channel is None:
                     continue
                 try:
-                    embed = await cog.build_daily_post(channel)
-                    if embed is not None:
-                        await channel.send(embed=embed)
+                    # Catch up on results shared since the last scan, so the
+                    # post knows who shared the day's result here.
+                    await cog._sync_channel(
+                        channel,
+                        dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)
+                        - cog.SCAN_BUFFER,
+                    )
+                    post = await cog.build_daily_post(channel)
+                    if post is not None:
+                        embed, file = post
+                        await channel.send(embed=embed, file=file)
                 except discord.Forbidden:
                     self.bot.logger.warning(
                         f"Daily post: missing permissions for {game} "

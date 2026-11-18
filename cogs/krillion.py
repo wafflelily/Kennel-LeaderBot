@@ -38,6 +38,7 @@ does an incremental catch-up scan and reads its aggregates from there.
 """
 
 import asyncio
+import io
 import os
 import re
 from collections import Counter, defaultdict
@@ -51,6 +52,7 @@ from discord.ext import commands, tasks
 from discord.ext.commands import Context
 
 from leaderboard.base import LeaderboardCog, Trimmable, month_choices
+from leaderboard.krillion_table import render_day_table
 
 # Answer symbol -> points. ⬛ means "no submission".
 VALUES = {"⬛": 0, "🫧": 10, "🤡": 15, "🐟": 30, "🦑": 60, "🏮": 85, "🌟": 100}
@@ -123,10 +125,11 @@ FRIENDS_AT = [
     time(hour=21, tzinfo=RESET_TZ),
     time(hour=23, minute=45, tzinfo=RESET_TZ),
 ]
+# The daily post only goes out once this many linked members shared that
+# day's result in the channel.
+MIN_DAILY_PLAYERS = 2
 # krillion.io usernames as typed by members (a leading @ is stripped).
 USERNAME_RE = re.compile(r"[A-Za-z0-9_.-]{1,32}")
-# Points value -> grid symbol, for showing friends' answers.
-SYMBOLS = {points: symbol for symbol, points in VALUES.items()}
 
 
 def _short(text: str, limit: int = 60) -> str:
@@ -650,11 +653,15 @@ class Krillion(LeaderboardCog, name="krillion"):
             ephemeral=True,
         )
 
-    async def build_daily_post(self, channel) -> discord.Embed | None:
+    async def build_daily_post(
+        self, channel
+    ) -> tuple[discord.Embed, discord.File] | None:
         """
-        The previous day's answers from linked members of this channel's
-        server, for the daily auto-post. Returns None when there's nothing
-        to show.
+        The previous day's answers from linked members who shared that day's
+        result in this channel, for the daily auto-post: an embed showing a
+        table image (prompts × players), and the image file to send with it.
+        Reads the channel's cached results, so sync the channel first. Returns
+        None unless at least ``MIN_DAILY_PLAYERS`` of them did.
         """
         guild = getattr(channel, "guild", None)
         if guild is None:
@@ -665,44 +672,60 @@ class Krillion(LeaderboardCog, name="krillion"):
         if day is None:
             return None
         info = stored[day]
+        # Only linked members who shared that day's result in this channel,
+        # and only once at least two of them did.
+        posted_here = {
+            row["author_id"]
+            for row in await self._load_all(channel.id)
+            if row["payload"]["puzzle"] == day
+        }
         players = {
             user_id: played
             for user_id, played in (await self._linked_days()).get(day, {}).items()
-            if guild.get_member(user_id) is not None
+            if user_id in posted_here and guild.get_member(user_id) is not None
         }
-        if not players:
+        if len(players) < MIN_DAILY_PLAYERS:
             return None
         names = await self._resolve_names(
             guild, list(players), {uid: p["username"] for uid, p in players.items()}
         )
         order = sorted(players, key=lambda uid: -(players[uid].get("score") or 0))
+        texts = info.get("prompts") or []
+        prompts = [
+            texts[slot] if slot < len(texts) else f"Round {slot + 1}"
+            for slot in range(PROMPTS)
+        ]
+        columns = [
+            {
+                "name": names[uid],
+                "score": players[uid].get("score"),
+                "rounds": [_friend_round(players[uid], info, slot) for slot in range(PROMPTS)],
+            }
+            for uid in order
+        ]
+        # Pillow drawing is CPU-bound; keep it off the event loop.
+        png = await asyncio.to_thread(
+            render_day_table, day, info.get("date") or "", prompts, columns
+        )
+        filename = f"krillion-{day}.png"
+        # Alt text, for screen readers.
+        description = _short(
+            f"Krillion #{day} answers: "
+            + "; ".join(f"{c['name']} {c['score'] or 0} pts" for c in columns),
+            1024,
+        )
+        file = discord.File(io.BytesIO(png), filename=filename, description=description)
 
         embed = discord.Embed(
             title=f"🦐 Krillion #{day} — the catch",
             description=" · ".join(
-                f"**{names[uid]}** {players[uid].get('score') or 0}" for uid in order
+                f"**{c['name']}** {c['score'] or 0}" for c in columns
             ),
             color=0xBEBEFE,
         )
-        texts = info.get("prompts") or []
-        for slot in range(PROMPTS):
-            prompt = texts[slot] if slot < len(texts) else f"Round {slot + 1}"
-            lines = []
-            for uid in order:
-                played = _friend_round(players[uid], info, slot)
-                if played is None:
-                    continue
-                symbol = SYMBOLS.get(played.get("score"), "⬛")
-                answer = _short(played.get("answer") or "*no answer*", 40)
-                lines.append(f"{symbol} {answer} — {names[uid]}")
-            if lines:
-                embed.add_field(
-                    name=_short(f"{slot + 1}. {prompt}", 250),
-                    value=_short("\n".join(lines), 1024),
-                    inline=False,
-                )
+        embed.set_image(url=f"attachment://{filename}")
         embed.set_footer(text=f"{info.get('date')} · linked with /krillionlink")
-        return embed
+        return embed, file
 
     # ------------------------------------------------------------------ #
     # Parsing
