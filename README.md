@@ -31,7 +31,7 @@ PREFIX=!
 INVITE_LINK=your-oauth2-invite-url
 ```
 
-Optional variables: `OWNER_NAME` (shown by `/botinfo`), `STATUSES` (comma-separated rotating "Playing …" statuses), `AUTOPOST_HOUR` (UTC hour, 0–23, when monthly auto-posts go out; default 8), and `KRILLION_UNLOCK_TOKEN` (a krillion.io Unlimited unlock token; lets the Krillion archiver fill in days it missed from the site's paid archive), and `KRILLION_REFRESH_TOKEN` (the bot owner's krillion.io sign-in refresh token; turns on the Krillion friends' answers features — see `.env.example` for how to get it). That's all the configuration there is — no other config files. The SQLite database (`database/database.db`) is created and migrated automatically on startup.
+Optional variables: `OWNER_NAME` (shown by `/botinfo`), `STATUSES` (comma-separated rotating "Playing …" statuses), `AUTOPOST_HOUR` (UTC hour, 0–23, when monthly auto-posts go out; default 8), and `KRILLION_UNLOCK_TOKEN` (a krillion.io Unlimited unlock token; lets the Krillion archiver fill in days it missed from the site's paid archive), and `KRILLION_REFRESH_TOKEN` (the bot owner's krillion.io sign-in refresh token; turns on the Krillion friends' answers features — see `.env.example` for how to get it) with `KRILLION_FIREBASE_API_KEY` (krillion.io's public Firebase web API key, needed to use that token). That's all the configuration there is — no other config files. The SQLite database (`database/database.db`) is created and migrated automatically on startup.
 
 ### Running
 

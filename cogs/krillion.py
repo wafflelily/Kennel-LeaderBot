@@ -106,13 +106,14 @@ TOO_SMART_POINTS = 15
 # plus the answers of friends who turned on "Share my answers with friends".
 # It needs the owner's Google sign-in, so the bot keeps the site's Firebase
 # refresh token (KRILLION_REFRESH_TOKEN) and swaps it for an hour-long ID
-# token. Only the current day is served, so it's snapshotted in the evening;
-# the answers are only shown for members who linked themselves with
+# token. The swap needs krillion.io's Firebase web API key
+# (KRILLION_FIREBASE_API_KEY) — public, it ships in the site's own JS, but
+# kept out of the code so it doesn't trip secret scanners. Only the current
+# day is served, so it's snapshotted through the afternoon and evening; the
+# answers are only shown for members who linked themselves with
 # /krillionlink, and only once the day is over.
 FRIENDS_URL = "https://krillion.io/api/friends"
-# krillion.io's public Firebase web API key (it ships in the site's own JS).
-FIREBASE_API_KEY = "AIzaSyBaZVDjFZV4zv5OaOApvy-nVQSOl0bf_ok"
-TOKEN_URL = f"https://securetoken.googleapis.com/v1/token?key={FIREBASE_API_KEY}"
+TOKEN_URL = "https://securetoken.googleapis.com/v1/token?key={key}"
 # When to snapshot the Friends tab (US Eastern, the site's day): spread from
 # the afternoon on, so one failed fetch doesn't lose the day, with the last
 # shortly before the midnight reset to catch late players.
@@ -419,21 +420,24 @@ class Krillion(LeaderboardCog, name="krillion"):
     # Friends' answers
     # ------------------------------------------------------------------ #
 
-    async def _friends_id_token(self, session, refresh_token: str) -> str | None:
+    async def _friends_id_token(
+        self, session, refresh_token: str, api_key: str
+    ) -> str | None:
         """A Firebase ID token for the owner's account, refreshed as needed."""
         now = datetime.now(timezone.utc)
         if self._id_token is not None and self._id_token[1] > now:
             return self._id_token[0]
         try:
             async with session.post(
-                TOKEN_URL,
+                TOKEN_URL.format(key=api_key),
                 data={"grant_type": "refresh_token", "refresh_token": refresh_token},
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
                 if resp.status != 200:
                     self.bot.logger.warning(
                         f"Krillion sign-in refresh failed (HTTP {resp.status}); "
-                        "is KRILLION_REFRESH_TOKEN still valid?"
+                        "are KRILLION_REFRESH_TOKEN and KRILLION_FIREBASE_API_KEY "
+                        "still valid?"
                     )
                     return None
                 data = await resp.json()
@@ -479,14 +483,16 @@ class Krillion(LeaderboardCog, name="krillion"):
     async def _snapshot_friends(self) -> None:
         """
         Fetch today's Friends tab and store every shared set of answers under
-        the day's number. Does nothing without KRILLION_REFRESH_TOKEN, or while
-        the board is still locked (the owner hasn't finished today's daily).
+        the day's number. Does nothing without KRILLION_REFRESH_TOKEN and
+        KRILLION_FIREBASE_API_KEY, or while the board is still locked (the
+        owner hasn't finished today's daily).
         """
         refresh_token = os.getenv("KRILLION_REFRESH_TOKEN")
-        if not refresh_token:
+        api_key = os.getenv("KRILLION_FIREBASE_API_KEY")
+        if not refresh_token or not api_key:
             return
         async with aiohttp.ClientSession() as session:
-            token = await self._friends_id_token(session, refresh_token)
+            token = await self._friends_id_token(session, refresh_token, api_key)
             if token is None:
                 return
             board = await self._get_json(
