@@ -710,8 +710,9 @@ class Catfishing(LeaderboardCog, name="catfishing"):
         if answers:
             answers.sort(key=lambda a: a[0])
             hardest = answers[:HARDEST_COUNT]
-            # Easiest from the other end, never overlapping the hardest list.
-            easiest = list(reversed(answers[HARDEST_COUNT:]))[:HARDEST_COUNT]
+            # Easiest from the other end, never overlapping the hardest list,
+            # listed like the hardest (rate ascending) so the easiest is last.
+            easiest = answers[HARDEST_COUNT:][-HARDEST_COUNT:]
             lines.append("### Hardest answers nobody else got")
             lines += [f"• {title} — {rate:.1f}% (#{p})" for rate, title, p in hardest]
             if easiest:

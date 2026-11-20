@@ -287,9 +287,9 @@ class TestCatfishingCompare:
         assert hardest == [
             f"• Answer{i} — {rates[i]:.1f}% (#700)" for i in range(5)
         ]
-        # Easiest come from the other end, most-solved first, no overlap.
+        # Easiest come from the other end, no overlap, the easiest last.
         assert easiest == [
-            f"• Answer{i} — {rates[i]:.1f}% (#700)" for i in (9, 8, 7, 6, 5)
+            f"• Answer{i} — {rates[i]:.1f}% (#700)" for i in (5, 6, 7, 8, 9)
         ]
 
     async def test_few_uniques_show_only_the_hardest_list(self, cog, rows):
