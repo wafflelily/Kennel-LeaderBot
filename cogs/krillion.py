@@ -125,6 +125,9 @@ FRIENDS_AT = [
     time(hour=21, tzinfo=RESET_TZ),
     time(hour=23, minute=45, tzinfo=RESET_TZ),
 ]
+# How often a command may re-fetch the friends list (e.g. /krillionlink
+# checking a name that wasn't on the last copy).
+FRIEND_LIST_COOLDOWN = timedelta(minutes=1)
 # The daily post only goes out once this many linked members shared that
 # day's result in the channel.
 MIN_DAILY_PLAYERS = 2
@@ -227,6 +230,7 @@ class Krillion(LeaderboardCog, name="krillion"):
         # From the last Friends fetch: the owner's username and their friends'.
         self._owner_username: str | None = None
         self._friend_usernames: set[str] = set()
+        self._friends_fetched_at: datetime | None = None
 
     async def cog_load(self) -> None:
         self.prompt_archiver.start()
@@ -496,28 +500,27 @@ class Krillion(LeaderboardCog, name="krillion"):
             "answers": answers,
         }
 
-    async def _snapshot_friends(self) -> None:
+    async def _fetch_friends_board(self) -> dict | None:
         """
-        Fetch today's Friends tab and store every shared set of answers under
-        the day's number. Does nothing without KRILLION_REFRESH_TOKEN and
-        KRILLION_FIREBASE_API_KEY, or while the board is still locked (the
-        owner hasn't finished today's daily).
+        Fetch the owner's Friends tab, remembering the owner's username and
+        the friends list. Returns the board, or None without
+        KRILLION_REFRESH_TOKEN and KRILLION_FIREBASE_API_KEY or on failure.
         """
         refresh_token = os.getenv("KRILLION_REFRESH_TOKEN")
         api_key = os.getenv("KRILLION_FIREBASE_API_KEY")
         if not refresh_token or not api_key:
-            return
+            return None
         async with aiohttp.ClientSession() as session:
             token = await self._friends_id_token(session, refresh_token, api_key)
             if token is None:
-                return
+                return None
             board = await self._get_json(
                 session, FRIENDS_URL, {"Authorization": f"Bearer {token}"}
             )
         if not isinstance(board, dict) or not isinstance(board.get("leaderboard"), list):
             # Most likely an expired ID token; get a fresh one next time.
             self._id_token = None
-            return
+            return None
         profile = board.get("profile") or {}
         self._owner_username = profile.get("username")
         self._friend_usernames = {
@@ -525,7 +528,35 @@ class Krillion(LeaderboardCog, name="krillion"):
             for e in board["leaderboard"]
             if isinstance(e, dict) and isinstance(e.get("username"), str)
         }
+        self._friends_fetched_at = datetime.now(timezone.utc)
+        return board
+
+    async def _refresh_friend_list(self) -> None:
+        """
+        Re-fetch the friends list for a command, at most once a minute, so
+        someone who just added the owner is found without a flood of requests
+        from repeated typos.
+        """
+        last = self._friends_fetched_at
+        if last is None or datetime.now(timezone.utc) - last >= FRIEND_LIST_COOLDOWN:
+            await self._fetch_friends_board()
+
+    async def _snapshot_friends(self) -> None:
+        """
+        Fetch today's Friends tab and store every friend's result under the
+        day's number. Does nothing without the sign-in settings, or while the
+        board is still locked (the owner hasn't finished today's daily).
+        """
+        board = await self._fetch_friends_board()
+        if board is None:
+            if os.getenv("KRILLION_REFRESH_TOKEN") and os.getenv("KRILLION_FIREBASE_API_KEY"):
+                self.bot.logger.warning("Krillion friends fetch failed; will retry later")
+            return
         if not board.get("unlocked"):
+            self.bot.logger.info(
+                "Krillion friends fetch: board locked until the owner finishes "
+                "today's daily; nothing stored"
+            )
             return
 
         stored = await self.bot.database.get_puzzle_info(self.GAME)
@@ -539,11 +570,35 @@ class Krillion(LeaderboardCog, name="krillion"):
                 None,
             )
             if day is None:
+                self.bot.logger.warning(
+                    f"Krillion friends fetch: no archived puzzle for "
+                    f"{board.get('date')}; nothing stored"
+                )
                 return
+        shared, private, unplayed, skipped = 0, 0, [], []
         for entry in board["leaderboard"]:
             found = self._friend_day(entry)
             if found is not None:
                 await self.bot.database.set_krillion_friend_answers(day, *found)
+                if found[1]["answers"]:
+                    shared += 1
+                else:
+                    private += 1
+            elif isinstance(entry, dict) and entry.get("score") is None:
+                unplayed.append(f"@{entry.get('username')}")
+            else:
+                # Played, but in a shape we don't understand.
+                name = entry.get("username") if isinstance(entry, dict) else None
+                skipped.append(f"@{name}")
+        summary = (
+            f"Krillion friends fetch for #{day}: stored {shared + private} "
+            f"({shared} with answers, {private} score only)"
+        )
+        if unplayed:
+            summary += f"; not played yet: {', '.join(unplayed)}"
+        if skipped:
+            summary += f"; skipped (unexpected data): {', '.join(skipped)}"
+        self.bot.logger.info(summary)
 
     @tasks.loop(time=FRIENDS_AT)
     async def friends_snapshot(self) -> None:
@@ -577,7 +632,7 @@ class Krillion(LeaderboardCog, name="krillion"):
         """
         if not self._friend_usernames:
             # Not fetched since startup; one fetch tells us who's still there.
-            await self._snapshot_friends()
+            await self._refresh_friend_list()
         if not self._friend_usernames or old.lower() in self._friend_usernames:
             return 0
         stored = await self.bot.database.get_krillion_friend_answers()
@@ -608,6 +663,41 @@ class Krillion(LeaderboardCog, name="krillion"):
                 ephemeral=True,
             )
             return
+        # The name must be on the owner's friends list; re-check the site if
+        # it isn't in the last copy, in case they've only just added the owner.
+        if username.lower() not in self._friend_usernames:
+            await self._refresh_friend_list()
+        owner = f"`@{self._owner_username}`" if self._owner_username else "the bot owner"
+        if not self._friend_usernames:
+            await context.send(
+                embed=discord.Embed(
+                    title="Error!",
+                    description=(
+                        "I couldn't check the Krillion friends list right now. "
+                        "Please try again later."
+                    ),
+                    color=0xE02B2B,
+                ),
+                ephemeral=True,
+            )
+            return
+        if username.lower() not in self._friend_usernames:
+            await context.send(
+                embed=discord.Embed(
+                    title="Error!",
+                    description=(
+                        f"`@{username}` isn't on {owner}'s Krillion friends list.\n\n"
+                        f"• Make sure you've added {owner} as a friend on krillion.io "
+                        "(Friends page).\n"
+                        "• Make sure you typed your Krillion username correctly; "
+                        "it's shown on your Friends page under **Manage your "
+                        "profile & invites**."
+                    ),
+                    color=0xE02B2B,
+                ),
+                ephemeral=True,
+            )
+            return
         previous = (await self.bot.database.get_krillion_links()).get(context.author.id)
         if not await self.bot.database.set_krillion_link(context.author.id, username):
             await context.send(
@@ -622,11 +712,10 @@ class Krillion(LeaderboardCog, name="krillion"):
                 ephemeral=True,
             )
             return
-        owner = f"`@{self._owner_username}`" if self._owner_username else "the bot owner"
         description = (
             f"Linked you to Krillion user `@{username}`.\n\n"
-            f"If you're friends with {owner} on krillion.io and have **Share my "
-            "answers with friends** turned on, then once each day is over:\n"
+            "As long as you keep **Share my answers with friends** turned on, "
+            "then once each day is over:\n"
             "• your answers appear in the daily Krillion post in channels with "
             "Krillion auto-posts on\n"
             "• your exact shrimp 🌟 and too smart 🤡 answers are named in "
@@ -640,11 +729,6 @@ class Krillion(LeaderboardCog, name="krillion"):
                     f"\n\nMoved {moved} day{'s' if moved != 1 else ''} of history "
                     f"from your old username `@{previous}`."
                 )
-        if self._friend_usernames and username.lower() not in self._friend_usernames:
-            description += (
-                f"\n\n⚠️ `@{username}` isn't on the friends list yet — add {owner} "
-                "as a friend on krillion.io."
-            )
         await context.send(
             embed=discord.Embed(
                 title="🦐 Krillion link", description=description, color=0xBEBEFE

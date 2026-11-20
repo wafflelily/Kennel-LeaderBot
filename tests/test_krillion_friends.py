@@ -174,6 +174,32 @@ class TestSnapshot:
         await cog._snapshot_friends()
         assert cog._id_token is None
 
+    async def test_logs_what_was_stored_and_who_hasnt_played(self, cog, db, caplog):
+        await db.set_puzzle_info("krillion", 47, {"date": "2026-08-30", "prompts": PROMPTS})
+        board = self.board()
+        board["leaderboard"].append(
+            {"username": "Odd", "score": 100, "answers": [{}] * 6}  # wrong round count
+        )
+        self.serve(cog, board)
+        with caplog.at_level(logging.INFO, logger="test"):
+            await cog._snapshot_friends()
+        assert caplog.messages == [
+            "Krillion friends fetch for #47: stored 3 (2 with answers, 1 score only)"
+            "; not played yet: @Late; skipped (unexpected data): @Odd"
+        ]
+
+    async def test_logs_a_locked_board(self, cog, db, caplog):
+        self.serve(cog, self.board(unlocked=False))
+        with caplog.at_level(logging.INFO, logger="test"):
+            await cog._snapshot_friends()
+        assert "board locked" in caplog.text
+
+    async def test_logs_a_failed_fetch(self, cog, db, caplog):
+        self.serve(cog, None)
+        with caplog.at_level(logging.INFO, logger="test"):
+            await cog._snapshot_friends()
+        assert "Krillion friends fetch failed" in caplog.text
+
     @pytest.mark.parametrize(
         "missing", ["KRILLION_REFRESH_TOKEN", "KRILLION_FIREBASE_API_KEY"]
     )
@@ -439,7 +465,7 @@ class TestRenames:
             fetched.append(True)
             cog._friend_usernames = {"newname"}
 
-        cog._snapshot_friends = fake_snapshot
+        cog._refresh_friend_list = fake_snapshot
         await self.days(db, "oldname", [1])
         assert await cog._carry_history("oldname", "newname") == 1
         assert fetched == [True]
@@ -450,7 +476,7 @@ class TestRenames:
         async def failed_snapshot():
             pass
 
-        cog._snapshot_friends = failed_snapshot
+        cog._refresh_friend_list = failed_snapshot
         await self.days(db, "oldname", [1])
         assert await cog._carry_history("oldname", "newname") == 0
 
@@ -470,3 +496,68 @@ class TestStartup:
         await cog.on_ready()
         await cog.on_ready()  # a reconnect fires on_ready again
         assert calls == ["archive", "friends"]
+
+
+class TestLinkCommand:
+    @pytest.fixture
+    def cog(self, db):
+        cog = Krillion(SimpleNamespace(database=db))
+        cog._owner_username = "battery_low"
+        cog._friend_usernames = {"battery_low", "shrimpfan"}
+        self.fetches = 0
+
+        async def fake_fetch():
+            self.fetches += 1
+            return None
+
+        cog._fetch_friends_board = fake_fetch
+        return cog
+
+    def context(self, user_id=1):
+        sent = []
+
+        async def send(embed=None, ephemeral=False):
+            sent.append(embed)
+
+        return SimpleNamespace(author=SimpleNamespace(id=user_id), send=send), sent
+
+    async def link(self, cog, username, user_id=1):
+        context, sent = self.context(user_id)
+        await cog.krillionlink.callback(cog, context, username)
+        return sent[-1]
+
+    async def test_links_a_friend(self, cog, db):
+        embed = await self.link(cog, "@ShrimpFan")
+        assert embed.title == "🦐 Krillion link"
+        assert await db.get_krillion_links() == {1: "shrimpfan"}
+        assert self.fetches == 0  # already on the cached list
+
+    async def test_refuses_a_name_not_on_the_friends_list(self, cog, db):
+        embed = await self.link(cog, "stranger")
+        assert embed.title == "Error!"
+        assert "isn't on `@battery_low`'s Krillion friends list" in embed.description
+        assert "added `@battery_low` as a friend" in embed.description
+        assert "typed your Krillion username correctly" in embed.description
+        assert await db.get_krillion_links() == {}
+
+    async def test_rechecks_the_site_for_a_brand_new_friend(self, cog, db):
+        async def fresh_fetch():
+            self.fetches += 1
+            cog._friend_usernames = {"battery_low", "shrimpfan", "newbie"}
+
+        cog._fetch_friends_board = fresh_fetch
+        embed = await self.link(cog, "newbie")
+        assert embed.title == "🦐 Krillion link"
+        assert self.fetches == 1
+
+    async def test_rechecks_at_most_once_a_minute(self, cog):
+        await self.link(cog, "typo_one")
+        cog._friends_fetched_at = datetime.now(RESET_TZ)  # as a real fetch would
+        await self.link(cog, "typo_two")
+        assert self.fetches == 1
+
+    async def test_says_so_when_the_list_cant_be_checked(self, cog, db):
+        cog._friend_usernames = set()
+        embed = await self.link(cog, "shrimpfan")
+        assert "couldn't check the Krillion friends list" in embed.description
+        assert await db.get_krillion_links() == {}
