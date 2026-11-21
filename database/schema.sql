@@ -81,6 +81,18 @@ CREATE TABLE IF NOT EXISTS `leaderboard_autopost` (
   PRIMARY KEY (`game`, `channel_id`)
 );
 
+-- Every automatic post that went out, so the scheduled run and the startup
+-- catch-up never post the same thing twice. `kind` is 'daily' (period = the
+-- puzzle number) or 'monthly' (period = 'YYYY-MM').
+CREATE TABLE IF NOT EXISTS `autopost_log` (
+  `game` TEXT NOT NULL,
+  `channel_id` TEXT NOT NULL,
+  `kind` TEXT NOT NULL,
+  `period` TEXT NOT NULL,
+  `message_id` TEXT NOT NULL,
+  PRIMARY KEY (`game`, `channel_id`, `kind`, `period`)
+);
+
 -- Tracks how much of each channel's history has already been scanned per game,
 -- so a command only fetches messages it hasn't seen instead of re-scanning the
 -- whole channel every time.

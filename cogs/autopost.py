@@ -7,8 +7,15 @@ then posts the finished month's final leaderboard for every opted-in
 manual commands (each leaderboard cog's ``build_leaderboard``). Games with a
 ``build_daily_post`` (Krillion's friends' answers) also get that posted every
 day by the same task.
+
+Every post is recorded (``autopost_log``), and on startup the bot catches up on
+the most recent one it missed: yesterday's daily recap if the post time has
+passed, and last month's board during the first few days of the month (a
+board weeks late would just be confusing). The record means neither the
+scheduled run nor a catch-up ever posts the same thing twice.
 """
 
+import asyncio
 import datetime as dt
 import os
 
@@ -29,14 +36,19 @@ def _post_hour() -> int:
     return hour if 0 <= hour <= 23 else 8
 
 
-# When the daily check fires (UTC). Only the run on the 1st of a month posts;
-# if the bot is offline at that moment the post for that month is skipped.
+# When the daily check fires (UTC). Only the run on the 1st of a month posts
+# the monthly boards; if the bot is offline then, startup catches up.
 POST_AT = dt.time(hour=_post_hour(), tzinfo=dt.timezone.utc)
+# On startup, a missed monthly board is still posted up to this day of the
+# month, and dropped after.
+MONTHLY_CATCHUP_DAYS = 3
 
 
 class AutoPost(commands.Cog, name="autopost"):
     def __init__(self, bot) -> None:
         self.bot = bot
+        self._lock = asyncio.Lock()
+        self._caught_up = False
 
     async def cog_load(self) -> None:
         self.monthly_post.start()
@@ -199,18 +211,22 @@ class AutoPost(commands.Cog, name="autopost"):
     ) -> list[app_commands.Choice[str]]:
         return game_choices(self._games(), current)
 
-    @tasks.loop(time=POST_AT)
-    async def monthly_post(self) -> None:
+    async def _post_daily(self, reason: str) -> None:
         """
-        Runs daily: posts any game's daily recap (e.g. Krillion friends'
-        answers) to opted-in channels, and on the 1st, last month's boards.
+        Post each game's daily recap (e.g. Krillion friends' answers) to its
+        opted-in channels, unless it already went out there.
         """
         for game, cog in self._games().items():
             if not hasattr(cog, "build_daily_post"):
                 continue
+            day = await cog.daily_post_day()
+            if day is None:
+                continue
             for channel_id in await self.bot.database.get_autopost_channels(game):
                 channel = self.bot.get_channel(channel_id)
-                if channel is None:
+                if channel is None or await self.bot.database.has_autopost(
+                    game, channel_id, "daily", str(day)
+                ):
                     continue
                 try:
                     # Catch up on results shared since the last scan, so the
@@ -220,10 +236,22 @@ class AutoPost(commands.Cog, name="autopost"):
                         dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)
                         - cog.SCAN_BUFFER,
                     )
-                    post = await cog.build_daily_post(channel)
-                    if post is not None:
-                        embed, file = post
-                        await channel.send(embed=embed, file=file)
+                    post = await cog.build_daily_post(channel, day)
+                    if post is None:
+                        self.bot.logger.info(
+                            f"Daily post ({reason}): nothing to post for {game} "
+                            f"#{day} in channel {channel_id}"
+                        )
+                        continue
+                    embed, file = post
+                    message = await channel.send(embed=embed, file=file)
+                    await self.bot.database.record_autopost(
+                        game, channel_id, "daily", str(day), message.id
+                    )
+                    self.bot.logger.info(
+                        f"Daily post ({reason}): posted {game} #{day} "
+                        f"in channel {channel_id}"
+                    )
                 except discord.Forbidden:
                     self.bot.logger.warning(
                         f"Daily post: missing permissions for {game} "
@@ -235,20 +263,34 @@ class AutoPost(commands.Cog, name="autopost"):
                         exc_info=True,
                     )
 
-        if dt.datetime.now(dt.timezone.utc).day != 1:
-            return
-        # On the 1st, the default window is exactly the month that just ended.
+    async def _post_monthly(self, reason: str) -> None:
+        """
+        Post last month's final boards to opted-in channels, unless they
+        already went out there.
+        """
+        # Early in a month, the default window is the month that just ended.
         after, label, month_filter = LeaderboardCog._resolve_window(None)
+        period = f"{month_filter[0]:04d}-{month_filter[1]:02d}"
         for game, cog in self._games().items():
             for channel_id in await self.bot.database.get_autopost_channels(game):
                 channel = self.bot.get_channel(channel_id)
-                if channel is None:
+                if channel is None or await self.bot.database.has_autopost(
+                    game, channel_id, "monthly", period
+                ):
                     continue
                 try:
                     await cog._sync_channel(channel, after - cog.SCAN_BUFFER)
                     embed = await cog.build_leaderboard(channel, month_filter, label)
-                    if embed is not None:
-                        await channel.send(embed=embed)
+                    if embed is None:
+                        continue
+                    message = await channel.send(embed=embed)
+                    await self.bot.database.record_autopost(
+                        game, channel_id, "monthly", period, message.id
+                    )
+                    self.bot.logger.info(
+                        f"Auto-post ({reason}): posted {game} {period} "
+                        f"in channel {channel_id}"
+                    )
                 except discord.Forbidden:
                     self.bot.logger.warning(
                         f"Auto-post: missing permissions for {game} "
@@ -259,6 +301,41 @@ class AutoPost(commands.Cog, name="autopost"):
                         f"Auto-post failed for {game} in channel {channel_id}",
                         exc_info=True,
                     )
+
+    @tasks.loop(time=POST_AT)
+    async def monthly_post(self) -> None:
+        """
+        Runs daily: posts any game's daily recap to opted-in channels, and on
+        the 1st, last month's boards.
+        """
+        async with self._lock:
+            await self._post_daily("scheduled")
+            if dt.datetime.now(dt.timezone.utc).day == 1:
+                await self._post_monthly("scheduled")
+
+    @commands.Cog.listener()
+    async def on_ready(self) -> None:
+        """
+        Once per start (not on reconnects), post what the schedule missed
+        while the bot was off: only the most recent of each, and only once
+        its time has come, so a start before the post time leaves it to the
+        schedule.
+        """
+        if self._caught_up:
+            return
+        self._caught_up = True
+        now = dt.datetime.now(dt.timezone.utc)
+        past_post_time = now >= dt.datetime.combine(now.date(), POST_AT)
+        # The monthly boards are due at the post time on the 1st; on the next
+        # few days they're overdue whatever the time.
+        monthly_due = (now.day == 1 and past_post_time) or (
+            1 < now.day <= MONTHLY_CATCHUP_DAYS
+        )
+        async with self._lock:
+            if past_post_time:
+                await self._post_daily("catch-up")
+            if monthly_due:
+                await self._post_monthly("catch-up")
 
     @monthly_post.before_loop
     async def before_monthly_post(self) -> None:

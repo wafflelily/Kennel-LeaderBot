@@ -251,6 +251,29 @@ class DatabaseManager:
             result = await cursor.fetchall()
         return [int(row[0]) for row in result]
 
+    async def record_autopost(
+        self, game: str, channel_id: int, kind: str, period: str, message_id: int
+    ) -> None:
+        """Note that an automatic post (daily or monthly) went out."""
+        await self.connection.execute(
+            "INSERT OR REPLACE INTO autopost_log "
+            "(game, channel_id, kind, period, message_id) VALUES (?, ?, ?, ?, ?)",
+            (game, str(channel_id), kind, period, str(message_id)),
+        )
+        await self.connection.commit()
+
+    async def has_autopost(
+        self, game: str, channel_id: int, kind: str, period: str
+    ) -> bool:
+        """Whether that automatic post already went out in that channel."""
+        rows = await self.connection.execute(
+            "SELECT 1 FROM autopost_log "
+            "WHERE game=? AND channel_id=? AND kind=? AND period=?",
+            (game, str(channel_id), kind, period),
+        )
+        async with rows as cursor:
+            return await cursor.fetchone() is not None
+
     async def get_autopost_games(self, channel_id: int) -> list[str]:
         """Return the games a channel is opted in to monthly auto-posts for."""
         rows = await self.connection.execute(

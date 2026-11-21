@@ -777,25 +777,33 @@ class Krillion(LeaderboardCog, name="krillion"):
             ephemeral=True,
         )
 
+    async def daily_post_day(self) -> int | None:
+        """
+        The day the daily auto-post covers: the one that last ended (yesterday,
+        on the site's US Eastern clock). None if that day isn't archived.
+        """
+        yesterday = (datetime.now(RESET_TZ) - timedelta(days=1)).date().isoformat()
+        stored = await self.bot.database.get_puzzle_info(self.GAME)
+        return next((d for d, i in stored.items() if i.get("date") == yesterday), None)
+
     async def build_daily_post(
-        self, channel
+        self, channel, day: int | None = None
     ) -> tuple[discord.Embed, discord.File] | None:
         """
-        The previous day's answers from linked members who shared that day's
-        result in this channel, for the daily auto-post: an embed showing a
-        table image (prompts × players), and the image file to send with it.
-        Reads the channel's cached results, so sync the channel first. Returns
-        None unless at least ``MIN_DAILY_PLAYERS`` of them did.
+        A day's answers (by default ``daily_post_day``) from linked members who
+        shared that day's result in this channel, for the daily auto-post: an
+        embed showing a table image (prompts × players), and the image file to
+        send with it. Reads the channel's cached results, so sync the channel
+        first. Returns None unless at least ``MIN_DAILY_PLAYERS`` of them did.
         """
         guild = getattr(channel, "guild", None)
         if guild is None:
             return None
-        yesterday = (datetime.now(RESET_TZ) - timedelta(days=1)).date().isoformat()
-        stored = await self.bot.database.get_puzzle_info(self.GAME)
-        day = next((d for d, i in stored.items() if i.get("date") == yesterday), None)
         if day is None:
+            day = await self.daily_post_day()
+        info = (await self.bot.database.get_puzzle_info(self.GAME)).get(day)
+        if info is None:
             return None
-        info = stored[day]
         # Only linked members who shared their answers with friends and that
         # day's result in this channel, and only once at least two of them did.
         posted_here = {
