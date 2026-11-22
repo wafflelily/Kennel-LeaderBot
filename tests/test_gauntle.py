@@ -1,5 +1,6 @@
 """Tests for the Gauntle cog: parsing, year inference and time formatting."""
 
+import logging
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
 
@@ -395,6 +396,7 @@ class TestTeamScore:
 
         async def send(text):
             sent.append(text)
+            return SimpleNamespace(id=len(sent))  # like discord's sent Message
 
         async def no_history():
             return
@@ -404,6 +406,7 @@ class TestTeamScore:
             id=100, send=send, history=lambda **kwargs: no_history()
         )
         cog.bot.get_channel = lambda cid: channel if cid == 100 else None
+        cog.bot.logger = logging.getLogger("test")
         await db.set_leaderboard_scan("gauntle", 100, None, "2026-01-01T00:00:00+00:00")
         for mid, author_id, sudoku in ((1, 1, "1:00.00"), (2, 2, "0:40.00")):
             message = live_message(mid, header + f"Sudoku: {sudoku}", [], author_id)
@@ -413,3 +416,105 @@ class TestTeamScore:
         await cog.daily_team_score()
         assert len(sent) == 1
         assert sent[0].startswith(f"🤝 **Team Gauntle for {today:%b %d}: 40.00s**")
+
+
+class TestTeamScoreCatchUp:
+    """Recorded team scores, and posting the most recent missed one on startup."""
+
+    @pytest.fixture
+    def setup(self, db, monkeypatch):
+        import cogs.gauntle as gauntle_module
+
+        state = SimpleNamespace(sent=[], history=[], scored=[])
+
+        def freeze(when):
+            class Frozen(datetime):
+                @classmethod
+                def now(cls, tz=None):
+                    return when
+
+            monkeypatch.setattr(gauntle_module, "datetime", Frozen)
+
+        async def send(text):
+            state.sent.append(text)
+            return SimpleNamespace(id=len(state.sent))
+
+        async def history(limit):
+            for message in state.history:
+                yield message
+
+        channel = SimpleNamespace(id=100, send=send, history=history)
+        me = SimpleNamespace(id=999)
+
+        async def make():
+            await db.set_leaderboard_scan("gauntle", 100, None, "2026-01-01T00:00:00+00:00")
+            bot = SimpleNamespace(
+                database=db,
+                logger=logging.getLogger("test"),
+                get_channel={100: channel}.get,
+                user=me,
+            )
+            cog = Gauntle(bot)
+
+            async def no_sync(channel, after):
+                pass
+
+            async def score(channel, day):
+                state.scored.append(day)
+                return f"{Gauntle._team_header(day)}: 1:00.00**"
+
+            cog._sync_channel, cog.build_team_score = no_sync, score
+            return cog
+
+        state.freeze, state.make, state.me = freeze, make, me
+        return state
+
+    @staticmethod
+    def at(day, hour, minute=0):
+        return datetime(2026, 11, day, hour, minute, tzinfo=timezone.utc)
+
+    async def test_startup_before_the_post_time_catches_up_yesterday(self, setup):
+        setup.freeze(self.at(22, 9))
+        await (await setup.make()).on_ready()
+        assert setup.scored == [date(2026, 11, 21)]
+        assert len(setup.sent) == 1
+
+    async def test_startup_after_the_post_time_catches_up_today(self, setup):
+        setup.freeze(self.at(22, 23, 58))
+        await (await setup.make()).on_ready()
+        assert setup.scored == [date(2026, 11, 22)]
+
+    async def test_runs_once_per_start(self, setup):
+        setup.freeze(self.at(22, 9))
+        cog = await setup.make()
+        await cog.on_ready()
+        await cog.on_ready()
+        assert len(setup.sent) == 1
+
+    async def test_restart_after_the_scheduled_post_doesnt_repost(self, setup):
+        setup.freeze(self.at(21, 23, 55))
+        scheduled = await setup.make()
+        await scheduled.daily_team_score.coro(scheduled)
+        setup.freeze(self.at(22, 9))
+        await (await setup.make()).on_ready()
+        assert len(setup.sent) == 1
+
+    async def test_finds_a_score_posted_before_posts_were_recorded(self, setup, db):
+        setup.history = [
+            SimpleNamespace(author=setup.me, id=7, content="🤝 **Team Gauntle for Nov 21: 9:00.00**")
+        ]
+        setup.freeze(self.at(22, 9))
+        await (await setup.make()).on_ready()
+        assert setup.sent == []
+        assert await db.has_autopost("gauntle", 100, "team", "2026-11-21")
+
+    async def test_someone_elses_message_doesnt_count(self, setup):
+        setup.history = [
+            SimpleNamespace(
+                author=SimpleNamespace(id=1), id=7,
+                content="🤝 **Team Gauntle for Nov 21: 9:00.00**",
+            )
+        ]
+        setup.freeze(self.at(22, 9))
+        await (await setup.make()).on_ready()
+        assert len(setup.sent) == 1

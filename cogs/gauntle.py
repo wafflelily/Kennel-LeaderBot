@@ -35,13 +35,15 @@ channel's most recent run as the current lineup.
 
 At the end of each day, any channel where two or more people posted a run for
 that day gets a small team score: the sum of the day's best time in each game
-across all players.
+across all players. Each one is recorded (``autopost_log``), and on startup
+the bot posts the most recent one it missed while it was off.
 
 Parsed results are cached in the database (see ``leaderboard.base``); the
 command does an incremental catch-up scan and reads its aggregates from there
 rather than re-scanning the whole channel each time.
 """
 
+import asyncio
 import re
 from collections import Counter, defaultdict
 from datetime import date, datetime, time, timedelta, timezone
@@ -79,6 +81,10 @@ CATEGORY_RE = re.compile(
 # "skip +90s". Handles both the ASCII hyphen and the Unicode minus sign (−).
 ADJ_RE = re.compile(r"([+\-−])\s*(\d+(?:\.\d+)?)\s*s", re.IGNORECASE)
 
+# How far back a startup catch-up looks for a team score posted before posts
+# were recorded, so a deploy doesn't repeat one.
+TEAM_SCORE_LOOKBACK = 50
+
 # A full Gauntle run has exactly this many categories. Once we've tallied that
 # many from a message we stop, so trailing text people add doesn't get parsed
 # as extra categories.
@@ -87,7 +93,7 @@ CATEGORIES_PER_RUN = 11
 # When the daily team score goes out (UTC): the end of the UTC day, which is
 # just before midnight in winter and just after it in summer for UK players.
 # It covers runs whose header date is that day; if the bot is offline at this
-# moment, that day's team score is skipped.
+# moment, startup posts the most recent missed one.
 TEAM_SCORE_AT = time(hour=23, minute=55, tzinfo=timezone.utc)
 
 
@@ -152,6 +158,11 @@ def _fmt_solve(raw: float | None, adj: float | None) -> str:
 
 class Gauntle(LeaderboardCog, name="gauntle"):
     GAME = "gauntle"
+
+    def __init__(self, bot) -> None:
+        super().__init__(bot)
+        self._team_lock = asyncio.Lock()
+        self._team_caught_up = False
 
     async def cog_load(self) -> None:
         self.daily_team_score.start()
@@ -352,7 +363,7 @@ class Gauntle(LeaderboardCog, name="gauntle"):
         # How much faster the team is than the day's fastest solo run.
         saved = min(row["payload"]["total"] for row in rows) - team
 
-        header = f"🤝 **Team Gauntle for {day:%b %d}: {_fmt_time(team)}**"
+        header = f"{self._team_header(day)}: {_fmt_time(team)}**"
         if saved > 0:
             header += f" — teamwork saved {_fmt_time(saved)}"
         lines = [header]
@@ -366,21 +377,53 @@ class Gauntle(LeaderboardCog, name="gauntle"):
         )
         return "\n".join(lines)
 
-    @tasks.loop(time=TEAM_SCORE_AT)
-    async def daily_team_score(self) -> None:
-        """Post today's team score in every channel where Gauntle is tracked."""
-        today = datetime.now(timezone.utc).date()
-        start = datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
+    @staticmethod
+    def _team_header(day: date) -> str:
+        return f"🤝 **Team Gauntle for {day:%b %d}"
+
+    async def _already_posted_team(self, channel, day: date) -> bool:
+        """
+        Whether the bot's team score for ``day`` is among the channel's recent
+        messages: a one-off check for scores posted before posts were
+        recorded, so the first catch-up after a deploy doesn't repeat one.
+        """
+        me = self.bot.user
+        header = self._team_header(day)
+        async for message in channel.history(limit=TEAM_SCORE_LOOKBACK):
+            if message.author == me and message.content.startswith(header):
+                await self.bot.database.record_autopost(
+                    self.GAME, channel.id, "team", day.isoformat(), message.id
+                )
+                return True
+        return False
+
+    async def _post_team_scores(self, day: date, reason: str) -> None:
+        """
+        Post ``day``'s team score in every channel where Gauntle is tracked,
+        unless it already went out there.
+        """
+        start = datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
         for channel_id in await self.bot.database.get_leaderboard_channels(self.GAME):
             channel = self.bot.get_channel(channel_id)
-            if channel is None:
+            if channel is None or await self.bot.database.has_autopost(
+                self.GAME, channel_id, "team", day.isoformat()
+            ):
                 continue
             try:
+                if reason == "catch-up" and await self._already_posted_team(channel, day):
+                    continue
                 # Catch up on anything live capture missed before tallying.
                 await self._sync_channel(channel, start - self.SCAN_BUFFER)
-                text = await self.build_team_score(channel, today)
-                if text is not None:
-                    await channel.send(text)
+                text = await self.build_team_score(channel, day)
+                if text is None:
+                    continue
+                message = await channel.send(text)
+                await self.bot.database.record_autopost(
+                    self.GAME, channel_id, "team", day.isoformat(), message.id
+                )
+                self.bot.logger.info(
+                    f"Team score ({reason}): posted {day} in channel {channel_id}"
+                )
             except discord.Forbidden:
                 self.bot.logger.warning(
                     f"Team score: missing permissions in channel {channel_id}"
@@ -389,6 +432,29 @@ class Gauntle(LeaderboardCog, name="gauntle"):
                 self.bot.logger.error(
                     f"Team score failed in channel {channel_id}", exc_info=True
                 )
+
+    @tasks.loop(time=TEAM_SCORE_AT)
+    async def daily_team_score(self) -> None:
+        """Post today's team score in every channel where Gauntle is tracked."""
+        async with self._team_lock:
+            await self._post_team_scores(datetime.now(timezone.utc).date(), "scheduled")
+
+    @commands.Cog.listener()
+    async def on_ready(self) -> None:
+        """
+        Once per start (not on reconnects), post the most recent team score
+        the schedule missed while the bot was off: today's if its time has
+        passed, otherwise yesterday's.
+        """
+        if self._team_caught_up:
+            return
+        self._team_caught_up = True
+        now = datetime.now(timezone.utc)
+        day = now.date()
+        if now < datetime.combine(day, TEAM_SCORE_AT):
+            day -= timedelta(days=1)
+        async with self._team_lock:
+            await self._post_team_scores(day, "catch-up")
 
     @daily_team_score.before_loop
     async def before_daily_team_score(self) -> None:
