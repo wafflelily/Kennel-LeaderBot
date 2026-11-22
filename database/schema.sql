@@ -65,7 +65,8 @@ CREATE TABLE IF NOT EXISTS `krillion_links` (
 -- through the day. Every friend who played is stored; `answers` is null for
 -- friends who keep theirs private. Only linked members' rows are ever shown.
 -- `username` is lowercased; `payload` holds the display username, score and
--- the 7 rounds ({prompt, answer, score}) or null.
+-- the 7 rounds ({answer, score}, in the archived prompts' order; the prompt
+-- text is read from puzzle_info) or null.
 CREATE TABLE IF NOT EXISTS `krillion_friend_answers` (
   `puzzle` INTEGER NOT NULL,
   `username` TEXT NOT NULL,

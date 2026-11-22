@@ -172,28 +172,24 @@ def _star_note(answers: list[str], limit: int = 40) -> str:
     return _short(" / ".join(answers), limit)
 
 
-def _friend_round(day: dict | None, info: dict, slot: int) -> dict | None:
+def _friend_round(day: dict | None, slot: int) -> dict | None:
     """
-    One friend's stored round for a prompt slot, or None.
+    One friend's stored round (``{answer, score}``) for a prompt slot, or None.
 
-    Rounds are matched to prompts by position; if the round's prompt text
-    disagrees with the archived one, it's not trusted.
+    Rounds are stored in the archived prompts' order (checked when they're
+    fetched), so the prompt text itself comes from the daily archive.
     """
     rounds = (day or {}).get("answers") or []
     if slot >= len(rounds) or not isinstance(rounds[slot], dict):
         return None
-    texts = info.get("prompts") or []
-    prompt = rounds[slot].get("prompt")
-    if prompt and slot < len(texts) and prompt.strip().lower() != texts[slot].strip().lower():
-        return None
     return rounds[slot]
 
 
-def _given_answers(days: list[dict | None], info: dict, slot: int, points: int) -> list[str]:
+def _given_answers(days: list[dict | None], slot: int, points: int) -> list[str]:
     """The answers these friends gave on a prompt slot that scored ``points``."""
     given = []
     for day in days:
-        played = _friend_round(day, info, slot)
+        played = _friend_round(day, slot)
         if played and played.get("score") == points and played.get("answer"):
             given.append(played["answer"])
     return given
@@ -423,6 +419,12 @@ class Krillion(LeaderboardCog, name="krillion"):
         if self._archived_on_boot:
             return
         self._archived_on_boot = True
+        stripped = await self.bot.database.strip_krillion_friend_prompts()
+        if stripped:
+            self.bot.logger.info(
+                f"Removed stored prompt text from {stripped} Krillion friend-days "
+                "(it's read from the daily archive)"
+            )
         await self._archive_today()
         await self._snapshot_friends()
 
@@ -487,12 +489,10 @@ class Krillion(LeaderboardCog, name="krillion"):
         for played in rounds:
             if not isinstance(played, dict):
                 return None
+            # The prompt text isn't kept: it's checked against the archive when
+            # fetched, and read from there.
             answers.append(
-                {
-                    "prompt": played.get("prompt"),
-                    "answer": played.get("answer"),
-                    "score": played.get("score") or 0,
-                }
+                {"answer": played.get("answer"), "score": played.get("score") or 0}
             )
         return entry["username"], {
             "username": entry["username"],
@@ -541,6 +541,27 @@ class Krillion(LeaderboardCog, name="krillion"):
         if last is None or datetime.now(timezone.utc) - last >= FRIEND_LIST_COOLDOWN:
             await self._fetch_friends_board()
 
+    @staticmethod
+    def _misordered(board: dict, prompts: list[str]) -> list[str]:
+        """
+        Friends whose rounds don't line up with the archived prompts, by
+        position. Rounds are stored without their prompt text (it's read from
+        the archive), so they must match before they're stored.
+        """
+        wanted = [p.strip().lower() for p in prompts]
+        odd = []
+        for entry in board["leaderboard"]:
+            rounds = entry.get("answers") if isinstance(entry, dict) else None
+            # Only check what would be stored; malformed entries are skipped.
+            if not isinstance(rounds, list) or len(rounds) != PROMPTS or not all(
+                isinstance(r, dict) for r in rounds
+            ):
+                continue
+            got = [(r.get("prompt") or "").strip().lower() for r in rounds]
+            if got != wanted:
+                odd.append(f"@{entry.get('username')}")
+        return odd
+
     async def _snapshot_friends(self) -> None:
         """
         Fetch today's Friends tab and store every friend's result under the
@@ -575,6 +596,13 @@ class Krillion(LeaderboardCog, name="krillion"):
                     f"{board.get('date')}; nothing stored"
                 )
                 return
+        misordered = self._misordered(board, stored[day].get("prompts") or [])
+        if misordered:
+            self.bot.logger.warning(
+                f"Krillion friends fetch for #{day}: rounds don't match the "
+                f"archived prompts for {', '.join(misordered)}; nothing stored"
+            )
+            return
         shared, private, unplayed, skipped = 0, 0, [], []
         for entry in board["leaderboard"]:
             found = self._friend_day(entry)
@@ -833,7 +861,7 @@ class Krillion(LeaderboardCog, name="krillion"):
             {
                 "name": names[uid],
                 "score": players[uid].get("score"),
-                "rounds": [_friend_round(players[uid], info, slot) for slot in range(PROMPTS)],
+                "rounds": [_friend_round(players[uid], slot) for slot in range(PROMPTS)],
             }
             for uid in order
         ]
@@ -1137,7 +1165,7 @@ class Krillion(LeaderboardCog, name="krillion"):
                 stars = (
                     _narrow(
                         _star_answers(info, slot),
-                        _given_answers(given_days, info, slot, SHRIMP_POINTS),
+                        _given_answers(given_days, slot, SHRIMP_POINTS),
                     )
                     if got_shrimp
                     else []
@@ -1149,7 +1177,7 @@ class Krillion(LeaderboardCog, name="krillion"):
                 clever = (
                     _narrow(
                         _too_smart_answers(info, slot),
-                        _given_answers(given_days, info, slot, TOO_SMART_POINTS),
+                        _given_answers(given_days, slot, TOO_SMART_POINTS),
                     )
                     if got_too_smart
                     else []
@@ -1266,7 +1294,7 @@ class Krillion(LeaderboardCog, name="krillion"):
                     own_day = linked.get(puzzle, {}).get(author_id)
                     named_answers = _narrow(
                         lookup(info, slot),
-                        _given_answers([own_day], info, slot, VALUES[symbol]),
+                        _given_answers([own_day], slot, VALUES[symbol]),
                     )
                     named = (
                         f" → **{_star_note(named_answers)}**" if named_answers else ""

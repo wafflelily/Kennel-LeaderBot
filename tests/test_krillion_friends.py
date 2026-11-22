@@ -79,7 +79,8 @@ class TestFriendDay:
         username, payload = Krillion._friend_day(entry)
         assert username == "Fan"
         assert payload["score"] == 300
-        assert payload["answers"][0] == {"prompt": "Q1", "answer": "a", "score": 100}
+        # The prompt text isn't kept; it's read from the daily archive.
+        assert payload["answers"][0] == {"answer": "a", "score": 100}
         assert payload["answers"][1]["score"] == 0
 
     def test_private_friend_is_stored_with_just_a_score(self):
@@ -148,7 +149,7 @@ class TestSnapshot:
         # Everyone who played, private or not; not the friend yet to play.
         assert sorted(stored[47]) == ["fan", "owner", "shy"]
         assert stored[47]["shy"] == {"username": "Shy", "score": 300, "answers": None}
-        assert stored[47]["fan"]["answers"][0] == {"prompt": "Q1", "answer": "f", "score": 100}
+        assert stored[47]["fan"]["answers"][0] == {"answer": "f", "score": 100}
         assert cog._owner_username == "Owner"
         assert cog._friend_usernames == {"owner", "fan", "late", "shy"}
 
@@ -187,6 +188,26 @@ class TestSnapshot:
             "Krillion friends fetch for #47: stored 3 (2 with answers, 1 score only)"
             "; not played yet: @Late; skipped (unexpected data): @Odd"
         ]
+
+    async def test_rounds_out_of_order_with_the_archive_store_nothing(
+        self, cog, db, caplog
+    ):
+        await db.set_puzzle_info("krillion", 47, {"date": "2026-08-30", "prompts": PROMPTS})
+        board = self.board()
+        board["leaderboard"][1]["answers"][6]["prompt"] = "Something else"
+        self.serve(cog, board)
+        with caplog.at_level(logging.INFO, logger="test"):
+            await cog._snapshot_friends()
+        assert await db.get_krillion_friend_answers() == {}
+        assert "don't match the archived prompts for @Fan" in caplog.text
+
+    async def test_prompt_case_and_spacing_dont_matter(self, cog, db):
+        await db.set_puzzle_info("krillion", 47, {"date": "2026-08-30", "prompts": PROMPTS})
+        board = self.board()
+        board["leaderboard"][1]["answers"][0]["prompt"] = "  q1 "
+        self.serve(cog, board)
+        await cog._snapshot_friends()
+        assert "fan" in (await db.get_krillion_friend_answers())[47]
 
     async def test_logs_a_locked_board(self, cog, db, caplog):
         self.serve(cog, self.board(unlocked=False))
@@ -235,16 +256,6 @@ class TestNarrowedCatches:
         await db.set_krillion_friend_answers(
             47, "fan", {"answers": rounds(["x"] * 6 + ["A7b"], [30] * 6 + [100])}
         )
-        rows = [row(1, {"puzzle": 47, "score": 280, "answers": [30] * 6 + [100]})]
-        lines = await cog.compare_stats(rows, 1)
-        catches_at = lines.index("### Shrimp catches 🌟")
-        assert lines[catches_at + 1] == ["• Q7 → **A7a / A7b** (#47)"]
-
-    async def test_mismatched_prompt_text_is_not_trusted(self, cog, db, day):
-        await db.set_krillion_link(1, "fan")
-        played = rounds(["x"] * 6 + ["A7b"], [30] * 6 + [100])
-        played[6]["prompt"] = "Something else"
-        await db.set_krillion_friend_answers(47, "fan", {"answers": played})
         rows = [row(1, {"puzzle": 47, "score": 280, "answers": [30] * 6 + [100]})]
         lines = await cog.compare_stats(rows, 1)
         catches_at = lines.index("### Shrimp catches 🌟")
@@ -482,8 +493,8 @@ class TestRenames:
 
 
 class TestStartup:
-    async def test_archives_then_snapshots_friends_once(self):
-        cog = Krillion(SimpleNamespace())
+    async def test_archives_then_snapshots_friends_once(self, db):
+        cog = Krillion(SimpleNamespace(database=db, logger=logging.getLogger("test")))
         calls = []
 
         async def archive():
@@ -561,3 +572,19 @@ class TestLinkCommand:
         embed = await self.link(cog, "shrimpfan")
         assert "couldn't check the Krillion friends list" in embed.description
         assert await db.get_krillion_links() == {}
+
+
+class TestPromptCleanup:
+    async def test_strips_stored_prompts_once(self, db):
+        await db.set_krillion_friend_answers(
+            47, "old", {"username": "old", "score": 280,
+                        "answers": rounds(["a"] * 7, [40] * 7)}
+        )
+        await db.set_krillion_friend_answers(
+            47, "private", {"username": "private", "score": 300, "answers": None}
+        )
+        assert await db.strip_krillion_friend_prompts() == 1
+        stored = (await db.get_krillion_friend_answers())[47]
+        assert stored["old"]["answers"][0] == {"answer": "a", "score": 40}
+        assert stored["private"]["answers"] is None
+        assert await db.strip_krillion_friend_prompts() == 0  # nothing left to do

@@ -215,6 +215,36 @@ class DatabaseManager:
         )
         await self.connection.commit()
 
+    async def strip_krillion_friend_prompts(self) -> int:
+        """
+        One-off cleanup: drop the per-round prompt text older rows stored (it's
+        read from the daily archive now). Returns how many rows changed.
+        """
+        rows = await self.connection.execute(
+            "SELECT puzzle, username, payload FROM krillion_friend_answers "
+            "WHERE payload LIKE '%\"prompt\"%'"
+        )
+        async with rows as cursor:
+            result = await cursor.fetchall()
+        changed = 0
+        for puzzle, username, raw in result:
+            payload = json.loads(raw)
+            rounds = payload.get("answers")
+            if not isinstance(rounds, list):
+                continue
+            payload["answers"] = [
+                {k: v for k, v in r.items() if k != "prompt"} if isinstance(r, dict) else r
+                for r in rounds
+            ]
+            await self.connection.execute(
+                "UPDATE krillion_friend_answers SET payload=? "
+                "WHERE puzzle=? AND username=?",
+                (json.dumps(payload), puzzle, username),
+            )
+            changed += 1
+        await self.connection.commit()
+        return changed
+
     async def get_krillion_friend_answers(self) -> dict[int, dict[str, dict]]:
         """Return all stored friends' answers: puzzle -> username -> payload."""
         rows = await self.connection.execute(
