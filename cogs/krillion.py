@@ -412,12 +412,33 @@ class Krillion(LeaderboardCog, name="krillion"):
                 + ", ".join(f"#{day}" for day in filled)
             )
 
+    async def _archived_today(self) -> int | None:
+        """
+        Today's day number if today's puzzle (the site's day, US Eastern) is
+        already archived complete with its answer sheet, else None.
+        """
+        today = datetime.now(RESET_TZ).date().isoformat()
+        stored = await self.bot.database.get_puzzle_info(self.GAME)
+        return next(
+            (
+                day
+                for day, info in stored.items()
+                if info.get("date") == today and "shrimp" in info and "too_smart" in info
+            ),
+            None,
+        )
+
     async def _archive_today(self) -> None:
         """
         Fetch and archive today's puzzle, then fill any missed past days from
-        the archive; failures just try again later.
+        the archive; failures just try again later. Once today is archived
+        with its answer sheet, later runs only check for missed past days.
         """
         async with aiohttp.ClientSession() as session:
+            day = await self._archived_today()
+            if day is not None:
+                await self._backfill_missing(session, day)
+                return
             today = await self._get_json(session, TODAY_URL)
             reveal = None
             if isinstance(today, dict) and today.get("date"):

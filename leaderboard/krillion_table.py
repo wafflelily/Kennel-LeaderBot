@@ -7,13 +7,12 @@ krillion.io's own: the deep-sea "abyss" background and "shallow" panels, foam
 and drift text, and the VT323 pixel font the whole site is set in (bundled in
 ``assets/fonts`` under the SIL Open Font License).
 
-Each tier gets a colour that evokes its emoji: 🌟 gold, 🏮 lantern red,
-🦑 squid pink, 🐟 fish cyan and 🤡 clown orange, all distinct from each other
-(including under colour blindness) on the abyss background. 🫧 plankton, the
-lowest tier, is a faint bubble outline rather than a sixth bright colour. A
-🌟 cell glows, like the site's top-tier marker. A ⬛ miss (no answer, 0
-points) is a hatched empty panel, so it can't be mistaken for faint plankton.
-Cells hold only the answer;
+Each tier uses the colour krillion.io gives that tier's text: 🌟 gold,
+🏮 deep-cut purple, 🦑 rare red, 🐟 schooler cyan, 🤡 too-clever orange and
+🫧 plankton slate. They stay distinct under colour blindness; the closest
+pair, 🤡 orange and 🌟 gold, is told apart by the glow a 🌟 cell gets, like
+the site's top-tier marker. A ⬛ miss (no answer, 0 points) is a hatched
+empty panel. Cells hold only the answer;
 the legend under the table pairs each colour with its emoji and points. The
 emojis are Twemoji images (``assets/emoji``, CC-BY 4.0), so they look the same
 whatever fonts the host has.
@@ -37,16 +36,16 @@ LINE_COLOUR = "#1b2c47"
 FOAM = "#e8f1ff"
 DRIFT = "#7d93b8"
 
-# Points -> (tier emoji's Twemoji codepoint, colour).
+# Points -> (tier emoji's Twemoji codepoint, colour). The colours are the
+# site's own tier text colours (its --tier-* CSS variables).
 TIERS = {
-    100: ("1f31f", "#ffe566"),  # 🌟 One in a Krillion
-    85: ("1f3ee", "#ff3347"),  # 🏮 Deep Cut
-    60: ("1f991", "#ff8fc8"),  # 🦑 Rare
-    30: ("1f41f", "#3fd0ff"),  # 🐟 Schooler
-    15: ("1f921", "#ff9124"),  # 🤡 Too Clever
-    10: ("1fae7", "#c9e6ff"),  # 🫧 Plankton
+    100: ("1f31f", "#ffd166"),  # 🌟 One in a Krillion
+    85: ("1f3ee", "#9d7bff"),  # 🏮 Deep Cut
+    60: ("1f991", "#ff5252"),  # 🦑 Rare
+    30: ("1f41f", "#4de3ff"),  # 🐟 Schooler
+    15: ("1f921", "#ff9f43"),  # 🤡 Too Clever
+    10: ("1fae7", "#8fa3c4"),  # 🫧 Plankton
 }
-PLANKTON = 10
 GLOWING = 100
 # A miss (0 points): ⬛, drawn as a hatched empty panel.
 MISS_EMOJI = "2b1b"
@@ -56,9 +55,8 @@ HATCH_SPACING = 9
 # Gold tinted into the navy panel turns olive, so gold cells sit on a warm
 # dark base instead.
 GOLD_BASE = "#17130a"
-# How strongly a tier's colour tints its cell (plankton stays faint).
+# How strongly a tier's colour tints its cell.
 TINT = 0.16
-FAINT_TINT = 0.05
 
 PAD = 20
 GAP = 6  # gap between cells
@@ -273,16 +271,11 @@ def render_day_table(
                 )
             continue
         _, colour = TIERS.get(points, ("", DRIFT))
-        faint = points == PLANKTON
         draw.rounded_rectangle(
             box,
             radius=6 * s,
-            fill=_blend(
-                colour,
-                GOLD_BASE if points == GLOWING else SHALLOW,
-                FAINT_TINT if faint else TINT,
-            ),
-            outline=_blend(colour, SHALLOW, 0.45) if faint else _rgb(colour),
+            fill=_blend(colour, GOLD_BASE if points == GLOWING else SHALLOW, TINT),
+            outline=_rgb(colour),
             width=s,
         )
         for n, line in enumerate(lines):
@@ -303,16 +296,11 @@ def render_day_table(
             codepoint = MISS_EMOJI
         else:
             codepoint, colour = TIERS[points]
-            faint = points == PLANKTON
             draw.rounded_rectangle(
                 chip,
                 radius=3 * s,
-                fill=_blend(
-                    colour,
-                    GOLD_BASE if points == GLOWING else SHALLOW,
-                    FAINT_TINT if faint else 0.35,
-                ),
-                outline=_blend(colour, SHALLOW, 0.45) if faint else _rgb(colour),
+                fill=_blend(colour, GOLD_BASE if points == GLOWING else SHALLOW, 0.35),
+                outline=_rgb(colour),
                 width=s,
             )
         emoji = _emoji(codepoint, EMOJI)

@@ -690,3 +690,44 @@ class TestRequestErrors:
             assert expected in caplog.text
         assert "key-secret" not in caplog.text
         assert "refresh-secret" not in caplog.text
+
+
+class TestArchiveOnlyWhenNeeded:
+    @pytest.fixture
+    def cog(self, db, monkeypatch):
+        monkeypatch.delenv("KRILLION_UNLOCK_TOKEN", raising=False)
+        cog = Krillion(SimpleNamespace(database=db, logger=logging.getLogger("test")))
+        self.calls = []
+        today = datetime.now(RESET_TZ).date().isoformat()
+        self.today = today
+
+        async def fake_get_json(session, url, headers=None):
+            self.calls.append(url)
+            if url == krillion_module.TODAY_URL:
+                return {"date": today, "dayNumber": 48,
+                        "prompts": [{"text": q} for q in PROMPTS]}
+            return {"prompts": [{"answers": [{"answer": "A", "score": 100}]}] * 7}
+
+        cog._get_json = fake_get_json
+        return cog
+
+    async def test_fetches_when_today_isnt_archived(self, cog, db, caplog):
+        with caplog.at_level(logging.INFO, logger="test"):
+            await cog._archive_today()
+        assert len(self.calls) == 2
+        assert "Archived today's Krillion puzzle" in caplog.text
+        assert (await db.get_puzzle_info("krillion"))[48]["date"] == self.today
+
+    async def test_skips_once_today_is_archived(self, cog, caplog):
+        await cog._archive_today()
+        self.calls.clear()
+        with caplog.at_level(logging.INFO, logger="test"):
+            await cog._archive_today()
+        assert self.calls == []
+        assert "Archived" not in caplog.text
+
+    async def test_refetches_a_day_stored_without_its_answer_sheet(self, cog, db):
+        await db.set_puzzle_info("krillion", 48, {"date": self.today, "prompts": PROMPTS})
+        await cog._archive_today()
+        assert len(self.calls) == 2
+        assert "shrimp" in (await db.get_puzzle_info("krillion"))[48]
