@@ -94,6 +94,8 @@ REVEAL_URL = "https://krillion.io/api/reveal?date={date}"
 ARCHIVE_URL = "https://krillion.io/api/archive/{day}"
 ARCHIVE_REVEAL_URL = "https://krillion.io/api/archive/{day}/reveal"
 UNLOCK_HEADER = "x-krillion-unlock"
+# How long a request to krillion.io (or the sign-in refresh) may take.
+REQUEST_TIMEOUT = 10
 # Pause between archive requests, to go easy on a one-person site.
 ARCHIVE_DELAY = 1.0
 # When the daily fetch runs (UTC; the puzzle resets at midnight US Eastern,
@@ -298,16 +300,43 @@ class Krillion(LeaderboardCog, name="krillion"):
         return True
 
     @staticmethod
-    async def _get_json(session, url, headers=None):
-        """GET a URL and return parsed JSON, or None on any failure."""
+    def _http_failure(resp) -> str:
+        """Describe a non-200 response, calling out rate limiting."""
+        if resp.status == 429:
+            retry = resp.headers.get("Retry-After")
+            return "HTTP 429, rate limited" + (f" (retry after {retry}s)" if retry else "")
+        return f"HTTP {resp.status}"
+
+    @staticmethod
+    def _exception_failure(error: Exception) -> str:
+        """Describe why a request raised: a timeout, a connection problem, bad JSON."""
+        if isinstance(error, asyncio.TimeoutError):
+            return f"timed out after {REQUEST_TIMEOUT}s"
+        if isinstance(error, aiohttp.ClientError):
+            detail = f": {error}" if str(error) else ""
+            return f"connection error ({type(error).__name__}{detail})"
+        return "response wasn't valid JSON"
+
+    async def _get_json(self, session, url, headers=None):
+        """
+        GET a URL and return parsed JSON, or None on any failure, logging why
+        (an HTTP status such as 429 rate limiting, a timeout, a connection
+        error or bad JSON). Headers, which may hold tokens, are never logged.
+        """
         try:
             async with session.get(
-                url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)
+                url, headers=headers, timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
             ) as resp:
                 if resp.status != 200:
+                    self.bot.logger.warning(
+                        f"Krillion request to {url} failed: {self._http_failure(resp)}"
+                    )
                     return None
                 return await resp.json()
-        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as error:
+            self.bot.logger.warning(
+                f"Krillion request to {url} failed: {self._exception_failure(error)}"
+            )
             return None
 
     @staticmethod
@@ -443,17 +472,21 @@ class Krillion(LeaderboardCog, name="krillion"):
             async with session.post(
                 TOKEN_URL.format(key=api_key),
                 data={"grant_type": "refresh_token", "refresh_token": refresh_token},
-                timeout=aiohttp.ClientTimeout(total=10),
+                timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT),
             ) as resp:
                 if resp.status != 200:
+                    # The URL holds the API key, so it isn't logged.
                     self.bot.logger.warning(
-                        f"Krillion sign-in refresh failed (HTTP {resp.status}); "
+                        f"Krillion sign-in refresh failed: {self._http_failure(resp)}; "
                         "are KRILLION_REFRESH_TOKEN and KRILLION_FIREBASE_API_KEY "
                         "still valid?"
                     )
                     return None
                 data = await resp.json()
-        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as error:
+            self.bot.logger.warning(
+                f"Krillion sign-in refresh failed: {self._exception_failure(error)}"
+            )
             return None
         token = data.get("id_token")
         if not token:

@@ -588,3 +588,105 @@ class TestPromptCleanup:
         assert stored["old"]["answers"][0] == {"answer": "a", "score": 40}
         assert stored["private"]["answers"] is None
         assert await db.strip_krillion_friend_prompts() == 0  # nothing left to do
+
+
+class TestRequestErrors:
+    """Failed krillion.io requests log why, so rate limiting is visible."""
+
+    class Response:
+        def __init__(self, status=200, body=None, headers=None, bad_json=False):
+            self.status, self.body, self.bad_json = status, body, bad_json
+            self.headers = headers or {}
+
+        async def json(self):
+            if self.bad_json:
+                raise ValueError("not json")
+            return self.body
+
+    class Session:
+        def __init__(self, outcome):
+            self.outcome = outcome
+
+        def get(self, url, headers=None, timeout=None):
+            return self._respond()
+
+        def post(self, url, data=None, timeout=None):
+            return self._respond()
+
+        def _respond(self):
+            outcome = self.outcome
+
+            class Context:
+                async def __aenter__(self):
+                    if isinstance(outcome, BaseException):
+                        raise outcome
+                    return outcome
+
+                async def __aexit__(self, *exc):
+                    return False
+
+            return Context()
+
+    @pytest.fixture
+    def cog(self):
+        return Krillion(SimpleNamespace(logger=logging.getLogger("test")))
+
+    async def get(self, cog, outcome, caplog):
+        with caplog.at_level(logging.INFO, logger="test"):
+            result = await cog._get_json(
+                self.Session(outcome), krillion_module.FRIENDS_URL,
+                {"Authorization": "Bearer secret-token"},
+            )
+        return result, caplog.text
+
+    async def test_success_logs_nothing(self, cog, caplog):
+        result, text = await self.get(cog, self.Response(body={"ok": 1}), caplog)
+        assert result == {"ok": 1}
+        assert text == ""
+
+    async def test_rate_limiting_is_called_out(self, cog, caplog):
+        response = self.Response(status=429, headers={"Retry-After": "30"})
+        result, text = await self.get(cog, response, caplog)
+        assert result is None
+        assert "api/friends failed: HTTP 429, rate limited (retry after 30s)" in text
+
+    async def test_other_statuses(self, cog, caplog):
+        _, text = await self.get(cog, self.Response(status=503), caplog)
+        assert "failed: HTTP 503" in text
+
+    async def test_timeouts(self, cog, caplog):
+        import asyncio
+
+        _, text = await self.get(cog, asyncio.TimeoutError(), caplog)
+        assert "failed: timed out after 10s" in text
+
+    async def test_connection_errors(self, cog, caplog):
+        import aiohttp
+
+        _, text = await self.get(cog, aiohttp.ClientConnectionError("reset"), caplog)
+        assert "failed: connection error (ClientConnectionError: reset)" in text
+
+    async def test_bad_json(self, cog, caplog):
+        _, text = await self.get(cog, self.Response(bad_json=True), caplog)
+        assert "failed: response wasn't valid JSON" in text
+
+    async def test_tokens_are_never_logged(self, cog, caplog):
+        _, text = await self.get(cog, self.Response(status=500), caplog)
+        assert "secret-token" not in text
+
+    async def test_sign_in_refresh_failures_hide_the_key(self, cog, caplog):
+        import asyncio
+
+        for outcome, expected in (
+            (self.Response(status=429), "sign-in refresh failed: HTTP 429, rate limited"),
+            (asyncio.TimeoutError(), "sign-in refresh failed: timed out after 10s"),
+        ):
+            cog._id_token = None
+            with caplog.at_level(logging.INFO, logger="test"):
+                token = await cog._friends_id_token(
+                    self.Session(outcome), "refresh-secret", "key-secret"
+                )
+            assert token is None
+            assert expected in caplog.text
+        assert "key-secret" not in caplog.text
+        assert "refresh-secret" not in caplog.text
